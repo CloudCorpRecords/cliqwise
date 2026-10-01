@@ -50,6 +50,7 @@ export const ListJobsResponseItem = zod.object({
   "storyScore": zod.number().nullable(),
   "payoffScore": zod.number().nullable(),
   "transcript": zod.string(),
+  "scoreReason": zod.string().nullable().describe('Persisted AI evidence explaining the clip\'s scores; null for unscored clips.'),
   "downloadUrl": zod.string(),
   "previewUrl": zod.string()
 }))
@@ -97,6 +98,7 @@ export const SubmitVideoResponse = zod.object({
   "storyScore": zod.number().nullable(),
   "payoffScore": zod.number().nullable(),
   "transcript": zod.string(),
+  "scoreReason": zod.string().nullable().describe('Persisted AI evidence explaining the clip\'s scores; null for unscored clips.'),
   "downloadUrl": zod.string(),
   "previewUrl": zod.string()
 }))
@@ -130,6 +132,7 @@ export const GetJobResponse = zod.object({
   "storyScore": zod.number().nullable(),
   "payoffScore": zod.number().nullable(),
   "transcript": zod.string(),
+  "scoreReason": zod.string().nullable().describe('Persisted AI evidence explaining the clip\'s scores; null for unscored clips.'),
   "downloadUrl": zod.string(),
   "previewUrl": zod.string()
 }))

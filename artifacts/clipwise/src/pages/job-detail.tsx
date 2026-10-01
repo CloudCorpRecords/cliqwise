@@ -24,6 +24,12 @@ function ClipCard({ c, i, wm }: { c: Clip; i: number; wm: boolean }) {
         </div>
         <p className="font-mono text-xs text-muted-foreground">{fmtDur(c.durationSeconds)}{wm ? ' - watermarked' : ''}</p>
         <div className="grid grid-cols-3 gap-3"><ScoreBar label="Hook" value={c.hookScore} /><ScoreBar label="Story" value={c.storyScore} /><ScoreBar label="Payoff" value={c.payoffScore} /></div>
+        {c.scoreReason && (
+          <details className="rounded-lg bg-muted p-3 text-sm" data-testid={`details-score-reason-${c.id}`}>
+            <summary className="cursor-pointer font-medium">Why this clip</summary>
+            <p className="mt-2 leading-relaxed text-muted-foreground">{c.scoreReason}</p>
+          </details>
+        )}
         <Button asChild className="w-full"><a href={c.downloadUrl} download data-testid={`link-download-${c.id}`}><Download className="mr-2 h-4 w-4" />Download</a></Button>
         <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} data-testid={`button-transcript-${c.id}`} className="flex w-full items-center justify-between text-sm font-medium">
           Transcript <ChevronDown className={`h-4 w-4 transition ${open ? 'rotate-180' : ''}`} />

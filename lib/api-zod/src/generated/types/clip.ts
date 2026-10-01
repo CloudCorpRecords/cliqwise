@@ -22,6 +22,11 @@ export interface Clip {
   /** @nullable */
   payoffScore: number | null;
   transcript: string;
+  /**
+     * Persisted AI evidence explaining the clip's scores; null for unscored clips.
+     * @nullable
+     */
+  scoreReason: string | null;
   downloadUrl: string;
   previewUrl: string;
 }

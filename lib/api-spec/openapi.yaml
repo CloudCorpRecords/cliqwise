@@ -167,7 +167,7 @@ components:
         clips: {type: array, items: {$ref: "#/components/schemas/Clip"}}
     Clip:
       type: object
-      required: [id, title, durationSeconds, viralityScore, hookScore, storyScore, payoffScore, transcript, downloadUrl, previewUrl]
+      required: [id, title, durationSeconds, viralityScore, hookScore, storyScore, payoffScore, transcript, scoreReason, downloadUrl, previewUrl]
       properties:
         id: {type: string}
         title: {type: string}
@@ -177,6 +177,7 @@ components:
         storyScore: {type: [number, "null"]}
         payoffScore: {type: [number, "null"]}
         transcript: {type: string}
+        scoreReason: {type: [string, "null"], description: "Persisted AI evidence explaining the clip's scores; null for unscored clips."}
         downloadUrl: {type: string}
         previewUrl: {type: string}
     ApiKey:

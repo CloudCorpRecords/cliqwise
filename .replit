@@ -1,4 +1,4 @@
-modules = ["nodejs-24", "python-base-3.13"]
+modules = ["nodejs-24", "python-base-3.12"]
 
 [deployment]
 router = "application"
@@ -17,8 +17,8 @@ expertMode = true
 
 [postMerge]
 path = "scripts/post-merge.sh"
-timeoutMs = 20000
+timeoutMs = 180000
 
 [nix]
 channel = "stable-25_05"
-packages = ["dejavu_fonts", "ffmpeg", "yt-dlp"]
+packages = ["dejavu_fonts", "ffmpeg", "yt-dlp", "zlib", "gcc"]

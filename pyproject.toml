@@ -1,8 +1,9 @@
 [project]
 name = "repl-nix-workspace"
 version = "0.1.0"
-description = "Maintained YouTube downloader for Clipwise's Node API"
+description = "Local word-timed transcription and maintained YouTube downloads for Clipwise"
 requires-python = ">=3.12"
 dependencies = [
+    "faster-whisper>=1.2.1",
     "yt-dlp>=2026.8.19",
 ]

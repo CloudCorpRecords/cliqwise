@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 
 const directory = await mkdtemp(join(tmpdir(), 'clipwise-regressions-'));
 try {
-  const files = ['src/lib/video-ingest.test.mjs', 'src/lib/video-pipeline.test.mjs'];
+  const files = ['src/lib/video-ingest.test.mjs', 'src/lib/video-pipeline.test.mjs', 'src/lib/video-transcription-local.test.mjs'];
   const outputFiles = [];
   for (const [index, file] of files.entries()) {
     const outfile = join(directory, `test-${index}.mjs`);

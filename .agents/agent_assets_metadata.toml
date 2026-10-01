@@ -1,0 +1,16 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "wG6BawkVoJ-DhFFQDPwiX"
+uri = "file://test-results/clipwise-upload-export.mp4"
+type = "video"
+title = "Your captioned video export"
+description = "Actual uploaded sample exported as a vertical MP4 with locally transcribed, word-timed karaoke captions. Video and audio passed full decoding checks."
+logical_id = "aa850471-66b7-481f-9294-68ddc9b3fee0"
+content_hash = "sha256:d557d0e1bfcde8b50b0e7dd56576dadafb3e1fcaabd3d4ee5fe57a4b3d43430a"
+size = 2082263
+mtime_ms = 1790877237882
+storage_uri = "gcs://replit-rams-assets-kirk/rams/assets/repl:0b69f80e-3fec-45be-ad93-e3005b2ad2d3/aa850471-66b7-481f-9294-68ddc9b3fee0/a7d6fd75-5c84-4a6a-a4e5-a34488f74ea7"
+storage_version_token = "1790879283794239"
+content_type = "video/mp4"

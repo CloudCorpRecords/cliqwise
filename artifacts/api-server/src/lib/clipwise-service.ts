@@ -90,6 +90,7 @@ function serializeClip(row: {
   story_score: string | number | null;
   payoff_score: string | number | null;
   transcript: string;
+  score_reason: string | null;
 }): Record<string, unknown> {
   return {
     id: row.id,
@@ -100,6 +101,7 @@ function serializeClip(row: {
     storyScore: row.story_score == null ? null : numberValue(row.story_score),
     payoffScore: row.payoff_score == null ? null : numberValue(row.payoff_score),
     transcript: row.transcript,
+    scoreReason: row.virality_score === null ? null : row.score_reason?.trim() || null,
     downloadUrl: clipContentUrl(row.id, true),
     previewUrl: clipContentUrl(row.id),
   };
@@ -182,9 +184,10 @@ export async function getJobForUser(
     story_score: string | number | null;
     payoff_score: string | number | null;
     transcript: string;
+    score_reason: string | null;
   }>(
     `SELECT id, title, duration_seconds, virality_score, hook_score,
-            story_score, payoff_score, transcript
+            story_score, payoff_score, transcript, score_reason
      FROM cw_clips WHERE job_id = $1 ORDER BY virality_score DESC NULLS LAST, id`,
     [id],
   );

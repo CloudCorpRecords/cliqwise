@@ -1,11 +1,10 @@
 import { createHash } from "node:crypto";
 import { createWriteStream } from "node:fs";
-import { access, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { access, readdir, stat, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
 import { Transform } from "node:stream";
 import { pipeline as streamPipeline } from "node:stream/promises";
-import { ReplitConnectors } from "@replit/connectors-sdk";
 import OpenAI from "openai";
 import { z } from "zod";
 import { pool } from "@workspace/db";
@@ -22,15 +21,13 @@ import {
 } from "./video-ingest";
 import { createAssCaptions, type TimedWord } from "./video-captions";
 import { completeJob, refundJob, reserveCredits } from "./clipwise-store";
+import { isLocalTranscriptionReady, transcribeLocalAudio } from "./video-transcription-local";
 
 const MAX_TRANSCRIPTION_CHUNK_BYTES = 24 * 1024 * 1024;
 const MAX_TRANSCRIPTION_WORDS = 100_000;
-const SCRIBE_REQUEST_TIMEOUT_MS = 180_000;
-const SCRIBE_MAX_ATTEMPTS = 2;
 const SCORE_MODEL = "gpt-5.4-mini";
 export const LOCAL_MEDIA_PROTOCOL_WHITELIST_ARGS = ["-protocol_whitelist", "file,pipe"] as const;
 const WORKER_POLL_MS = 2_000;
-const elevenLabs = new ReplitConnectors();
 
 interface VideoJob {
   id: string;
@@ -80,26 +77,48 @@ export interface ClipDurationBounds {
   maximumSeconds: number;
 }
 
+const numericStringSchema = z
+  .string()
+  .trim()
+  .regex(/^-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/)
+  .transform(Number);
+const finiteNumberSchema = z
+  .union([z.number().finite(), numericStringSchema])
+  .pipe(z.number().finite());
+const scoreSchema = finiteNumberSchema.pipe(z.number().min(0).max(100));
+const boundedTitleSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(2_000)
+  .transform((title) => title.slice(0, 100));
+const boundedReasonSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(8_000)
+  .transform((reason) => reason.slice(0, 400));
+
 const scoreAssessmentSchema = z.object({
-  title: z.string().min(1).max(120),
-  viralityScore: z.number().finite().min(0).max(100),
-  hookScore: z.number().finite().min(0).max(100),
-  storyScore: z.number().finite().min(0).max(100),
-  payoffScore: z.number().finite().min(0).max(100),
-  reason: z.string().min(1).max(1_000),
-  hookReason: z.string().min(1).max(400),
-  storyReason: z.string().min(1).max(400),
-  payoffReason: z.string().min(1).max(400),
+  title: boundedTitleSchema,
+  viralityScore: scoreSchema,
+  hookScore: scoreSchema,
+  storyScore: scoreSchema,
+  payoffScore: scoreSchema,
+  reason: z.string().trim().min(1).max(12_000).transform((reason) => reason.slice(0, 1_000)),
+  hookReason: boundedReasonSchema,
+  storyReason: boundedReasonSchema,
+  payoffReason: boundedReasonSchema,
 });
 
 const scoredCandidateSchema = scoreAssessmentSchema.extend({
-  startSeconds: z.number().finite(),
-  endSeconds: z.number().finite(),
-  excerpt: z.string().min(1).max(1_000),
+  startSeconds: finiteNumberSchema,
+  endSeconds: finiteNumberSchema,
+  excerpt: z.string().trim().min(1).max(20_000),
 });
 
-const scoredResponseSchema = z.object({
-  candidates: z.array(scoredCandidateSchema).max(10),
+const scoredCandidateEnvelopeSchema = z.object({
+  candidates: z.array(z.unknown()),
 });
 
 const shortScoredResponseSchema = z.object({
@@ -216,17 +235,14 @@ export function startVideoWorker(): void {
 
 /**
  * Reports local integration prerequisites without issuing provider requests on
- * every system-status request. The ElevenLabs connector is authenticated by
- * ReplitConnectors and was capability-checked during setup.
+ * every system-status request.
  */
 export function isVideoPipelineReady(): boolean {
   return Boolean(
     process.env.AI_INTEGRATIONS_OPENAI_API_KEY &&
       process.env.AI_INTEGRATIONS_OPENAI_BASE_URL &&
       process.env.PRIVATE_OBJECT_DIR &&
-      typeof globalThis.fetch === "function" &&
-      typeof globalThis.FormData === "function" &&
-      typeof globalThis.Blob === "function",
+      isLocalTranscriptionReady(),
   );
 }
 
@@ -638,34 +654,7 @@ async function transcribeVideoAudio(
     if (size > MAX_TRANSCRIPTION_CHUNK_BYTES) {
       throw new Error("An audio segment exceeded the 25 MB transcription limit.");
     }
-    const audioBytes = await readFile(chunkPath);
-    let attempts = 0;
-    let transcription: TimedWord[];
-    try {
-      transcription = await transcribeScribeWords(
-        audioBytes,
-        undefined,
-        SCRIBE_REQUEST_TIMEOUT_MS,
-        (failure) => {
-          attempts += 1;
-          logger.warn(
-            {
-              chunk: index + 1,
-              attempt: attempts,
-              category: failure.scribeCategory,
-              ...(failure.status ? { status: failure.status } : {}),
-              ...(failure.diagnosticCategory
-                ? { diagnosticCategory: failure.diagnosticCategory }
-                : {}),
-              ...(failure.providerCode ? { providerCode: failure.providerCode } : {}),
-            },
-            "ElevenLabs Scribe attempt failed",
-          );
-        },
-      );
-    } catch (error) {
-      throw new Error(formatScribeFailureForUser(asScribeFailure(error)));
-    }
+    const transcription = await transcribeLocalAudio(chunkPath);
     const offset = index * 600;
     for (const word of transcription) {
       const start = Math.max(0, Math.min(videoDuration, offset + word.start));
@@ -679,430 +668,6 @@ async function transcribeVideoAudio(
   return allWords.sort((left, right) => left.start - right.start);
 }
 
-const scribeResponseSchema = z.object({
-  words: z.array(
-    z.object({
-      text: z.string().nullable().optional(),
-      start: z.number().finite().nullable().optional(),
-      end: z.number().finite().nullable().optional(),
-      type: z.string().nullable().optional(),
-    }).passthrough(),
-  ),
-});
-
-type ScribeResponse = z.infer<typeof scribeResponseSchema>;
-type ScribeFailureCategory =
-  | "http_status"
-  | "timeout"
-  | "network"
-  | "invalid_json"
-  | "invalid_response"
-  | "invalid_word_timestamps";
-type ScribeDiagnosticCategory =
-  | "provider_invalid_api_key"
-  | "provider_missing_permissions"
-  | "provider_quota"
-  | "provider_insufficient_credits"
-  | "provider_free_tier_disabled"
-  | "provider_activity_restriction"
-  | "provider_rate_limit"
-  | "proxy_identity_unauthorized"
-  | "unauthorized_unknown"
-  | "provider_error_unknown";
-type ScribeProviderCode =
-  | "invalid_api_key"
-  | "missing_permissions"
-  | "insufficient_permissions"
-  | "permission_denied"
-  | "quota_exceeded"
-  | "insufficient_quota"
-  | "insufficient_credits"
-  | "free_tier_disabled"
-  | "free_tier_contention"
-  | "free_tier_restricted"
-  | "rate_limit_exceeded"
-  | "unusual_activity"
-  | "suspicious_activity"
-  | "automated_activity"
-  | "invalid_replit_token"
-  | "replit_identity_unauthorized"
-  | "identity_token_invalid";
-type ScribeFailure = Error & {
-  scribeCategory: ScribeFailureCategory;
-  status?: number;
-  diagnosticCategory?: ScribeDiagnosticCategory;
-  providerCode?: ScribeProviderCode;
-  retryable: boolean;
-};
-
-export async function transcribeScribeChunk(
-  audioBytes: Buffer,
-  proxyFetch: typeof fetch = elevenLabs.createProxyFetch("elevenlabs"),
-  timeoutMs = SCRIBE_REQUEST_TIMEOUT_MS,
-): Promise<ScribeResponse> {
-  const form = new FormData();
-  form.append("model_id", "scribe_v1");
-  form.append("timestamps_granularity", "word");
-  form.append(
-    "file",
-    new Blob([Uint8Array.from(audioBytes)], { type: "audio/mpeg" }),
-    "audio.mp3",
-  );
-
-  const controller = new AbortController();
-  let rejectDeadline!: (error: ScribeFailure) => void;
-  const deadline = new Promise<never>((_resolve, reject) => {
-    rejectDeadline = reject;
-  });
-  const timer = setTimeout(() => {
-    const failure = createScribeFailure("timeout", undefined, true);
-    controller.abort(failure);
-    rejectDeadline(failure);
-  }, timeoutMs);
-  try {
-    let response: Response;
-    try {
-      response = await Promise.race([
-        proxyFetch("/v1/speech-to-text", {
-          method: "POST",
-          body: form,
-          signal: controller.signal,
-        }),
-        deadline,
-      ]);
-    } catch (error) {
-      if (isScribeFailure(error)) throw error;
-      throw createScribeFailure("network", undefined, true);
-    }
-    if (!response.ok) {
-      const errorPayload = await readScribeErrorPayload(response, deadline);
-      const diagnostic = classifyScribeErrorPayloadDetails(errorPayload, response.status);
-      throw createScribeFailure(
-        "http_status",
-        response.status,
-        response.status === 408 ||
-          response.status === 425 ||
-          response.status === 429 ||
-          response.status >= 500,
-        diagnostic.category,
-        diagnostic.providerCode,
-      );
-    }
-    let payload: unknown;
-    try {
-      payload = await Promise.race([response.json(), deadline]);
-    } catch (error) {
-      if (isScribeFailure(error)) throw error;
-      throw createScribeFailure("invalid_json", undefined, true);
-    }
-    const parsed = scribeResponseSchema.safeParse(payload);
-    if (!parsed.success) {
-      throw createScribeFailure("invalid_response", undefined, true);
-    }
-    return parsed.data;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-export async function transcribeScribeWords(
-  audioBytes: Buffer,
-  proxyFetch: typeof fetch = elevenLabs.createProxyFetch("elevenlabs"),
-  timeoutMs = SCRIBE_REQUEST_TIMEOUT_MS,
-  onAttemptFailure?: (failure: ScribeFailure) => void,
-): Promise<TimedWord[]> {
-  return withRetries(async () => {
-    try {
-      return extractTimedScribeWords(
-        await transcribeScribeChunk(audioBytes, proxyFetch, timeoutMs),
-      );
-    } catch (error) {
-      const failure = asScribeFailure(error);
-      onAttemptFailure?.(failure);
-      throw failure;
-    }
-  }, SCRIBE_MAX_ATTEMPTS);
-}
-
-const SCRIBE_ERROR_BODY_LIMIT_BYTES = 16 * 1024;
-
-async function readScribeErrorPayload(
-  response: Response,
-  deadline: Promise<never>,
-): Promise<unknown> {
-  const reader = response.body?.getReader();
-  if (!reader) return null;
-  const decoder = new TextDecoder();
-  let text = "";
-  let bytesRead = 0;
-  try {
-    while (bytesRead < SCRIBE_ERROR_BODY_LIMIT_BYTES) {
-      const { done, value } = await Promise.race([reader.read(), deadline]);
-      if (done) {
-        text += decoder.decode();
-        break;
-      }
-      if (!value) continue;
-      const remaining = SCRIBE_ERROR_BODY_LIMIT_BYTES - bytesRead;
-      const boundedChunk = value.subarray(0, remaining);
-      text += decoder.decode(boundedChunk, { stream: true });
-      bytesRead += boundedChunk.byteLength;
-    }
-  } catch (error) {
-    if (isScribeFailure(error)) throw error;
-    return null;
-  } finally {
-    void reader.cancel().catch(() => undefined);
-  }
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    return null;
-  }
-}
-
-export function classifyScribeErrorPayload(
-  payload: unknown,
-  httpStatus: number,
-): ScribeDiagnosticCategory {
-  return classifyScribeErrorPayloadDetails(payload, httpStatus).category;
-}
-
-function classifyScribeErrorPayloadDetails(
-  payload: unknown,
-  httpStatus: number,
-): {
-  category: ScribeDiagnosticCategory;
-  providerCode?: ScribeProviderCode;
-} {
-  const codes: string[] = [];
-  const messages: string[] = [];
-  const codeKeys = new Set(["code", "status", "error_code", "type"]);
-  const messageKeys = new Set(["error", "message", "detail", "description", "msg"]);
-  const visit = (value: unknown, key: string, depth: number): void => {
-    if (depth > 5) return;
-    if (typeof value === "string") {
-      const normalizedKey = key.toLowerCase();
-      if (codeKeys.has(normalizedKey)) {
-        codes.push(value.toLowerCase().replace(/[^a-z0-9]+/g, "_"));
-      }
-      if (messageKeys.has(normalizedKey)) messages.push(value.toLowerCase());
-      return;
-    }
-    if (Array.isArray(value)) {
-      for (const item of value.slice(0, 12)) visit(item, key, depth + 1);
-      return;
-    }
-    if (value && typeof value === "object") {
-      for (const [childKey, child] of Object.entries(value).slice(0, 32)) {
-        if (
-          codeKeys.has(childKey.toLowerCase()) ||
-          messageKeys.has(childKey.toLowerCase())
-        ) {
-          visit(child, childKey, depth + 1);
-        }
-      }
-    }
-  };
-  visit(payload, "", 0);
-  const knownCodes: ScribeProviderCode[] = [
-    "invalid_api_key",
-    "missing_permissions",
-    "insufficient_permissions",
-    "permission_denied",
-    "quota_exceeded",
-    "insufficient_quota",
-    "insufficient_credits",
-    "free_tier_disabled",
-    "free_tier_contention",
-    "free_tier_restricted",
-    "rate_limit_exceeded",
-    "unusual_activity",
-    "suspicious_activity",
-    "automated_activity",
-    "invalid_replit_token",
-    "replit_identity_unauthorized",
-    "identity_token_invalid",
-  ];
-  const providerCode = knownCodes.find((knownCode) => codes.includes(knownCode));
-  const code = providerCode ?? codes.join(" ");
-  const message = messages.join(" ");
-  if (
-    /invalid_?api_?key|api_?key_?invalid/.test(code) ||
-    /invalid[_ ]api[_ ]key/.test(message)
-  ) {
-    return { category: "provider_invalid_api_key", providerCode };
-  }
-  if (
-    /missing_?permissions?|insufficient_?permissions?|permission_?denied/.test(code) ||
-    /missing[_ ]permissions?|insufficient[_ ]permissions?|permission denied/.test(message)
-  ) {
-    return { category: "provider_missing_permissions", providerCode };
-  }
-  if (code === "free_tier_disabled" || code === "free_tier_restricted") {
-    return { category: "provider_free_tier_disabled", providerCode };
-  }
-  if (
-    /free_?tier_?contention|unusual_?activity|suspicious_?activity|automated_?activity/.test(code) ||
-    /unusual activity|suspicious activity|automated (?:traffic|activity|requests?)/.test(message)
-  ) {
-    return { category: "provider_activity_restriction", providerCode };
-  }
-  if (
-    /free[- ]tier.{0,48}(disabled|not allowed|restricted|not enabled)|(?:disabled|restricted).{0,48}free[- ]tier/.test(message)
-  ) {
-    return { category: "provider_free_tier_disabled", providerCode };
-  }
-  if (
-    /insufficient_credits/.test(code) ||
-    /insufficient credits|not enough credits/.test(message)
-  ) {
-    return { category: "provider_insufficient_credits", providerCode };
-  }
-  if (
-    /quota_exceeded|insufficient_quota/.test(code) ||
-    /(?:quota|subscription limit|character limit|credits?).{0,40}(?:exceeded|exhausted|reached)|(?:exceeded|exhausted|reached).{0,40}(?:quota|subscription limit|character limit|credits?)/.test(message)
-  ) {
-    return { category: "provider_quota", providerCode };
-  }
-  if (/rate_?limit/.test(code) || /rate limit/.test(message) || httpStatus === 429) {
-    return { category: "provider_rate_limit", providerCode };
-  }
-  if (
-    /invalid_?replit_?token|replit_?identity_?unauthorized|identity_?token_?invalid/.test(code) ||
-    /replit.{0,32}(identity|token)|(identity|token).{0,32}(unauthorized|invalid|expired)|invalid (bearer )?token|token (is )?(invalid|expired)/.test(message)
-  ) {
-    return { category: "proxy_identity_unauthorized", providerCode };
-  }
-  if (httpStatus === 401) {
-    return { category: "unauthorized_unknown", providerCode };
-  }
-  return { category: "provider_error_unknown", providerCode };
-}
-
-export function extractTimedScribeWords(response: ScribeResponse): TimedWord[] {
-  const timedWords: TimedWord[] = [];
-  for (const event of response.words) {
-    if (event.type && event.type !== "word") continue;
-    const text = event.text?.trim();
-    if (!text) {
-      if (event.type === "word") {
-        throw createScribeFailure("invalid_response", undefined, true);
-      }
-      continue;
-    }
-    if (
-      typeof event.start !== "number" ||
-      typeof event.end !== "number" ||
-      !Number.isFinite(event.start) ||
-      !Number.isFinite(event.end) ||
-      event.end <= event.start
-    ) {
-      throw createScribeFailure("invalid_word_timestamps", undefined, true);
-    }
-    timedWords.push({ text, start: event.start, end: event.end });
-  }
-  return timedWords;
-}
-
-function createScribeFailure(
-  scribeCategory: ScribeFailureCategory,
-  status?: number,
-  retryable = false,
-  diagnosticCategory?: ScribeDiagnosticCategory,
-  providerCode?: ScribeProviderCode,
-): ScribeFailure {
-  const messages: Record<ScribeFailureCategory, string> = {
-    http_status: "Scribe returned an HTTP error.",
-    timeout: "Scribe transcription exceeded its request deadline.",
-    network: "Scribe proxy request failed.",
-    invalid_json: "Scribe returned invalid JSON.",
-    invalid_response: "Scribe returned an unexpected response shape.",
-    invalid_word_timestamps: "Scribe returned a speech word without valid timestamps.",
-  };
-  return Object.assign(new Error(messages[scribeCategory]), {
-    scribeCategory,
-    ...(status === undefined ? {} : { status }),
-    ...(diagnosticCategory === undefined ? {} : { diagnosticCategory }),
-    ...(providerCode === undefined ? {} : { providerCode }),
-    retryable,
-  });
-}
-
-function isScribeFailure(error: unknown): error is ScribeFailure {
-  return (
-    error instanceof Error &&
-    "scribeCategory" in error &&
-    typeof error.scribeCategory === "string"
-  );
-}
-
-function asScribeFailure(error: unknown): ScribeFailure {
-  if (isScribeFailure(error)) return error;
-  return createScribeFailure("network", undefined, false);
-}
-
-export function formatScribeFailureForUser(error: ScribeFailure): string {
-  if (error.scribeCategory === "http_status") {
-    if (error.providerCode === "free_tier_disabled") {
-      return "ElevenLabs returned free_tier_disabled: Scribe is unavailable for this free-tier account. Review account eligibility or contact ElevenLabs support; this is not a usage-quota diagnosis.";
-    }
-    if (error.providerCode === "free_tier_contention") {
-      return "ElevenLabs restricted this free-tier request because of activity or network limits. Wait and retry later, or ask ElevenLabs support to review the restriction.";
-    }
-    if (error.providerCode === "quota_exceeded") {
-      return "ElevenLabs returned quota_exceeded for Scribe. Check Scribe-specific or free-tier limits and account access with ElevenLabs before changing plans or buying credits; this code alone does not prove the overall account quota is exhausted.";
-    }
-    if (error.providerCode === "insufficient_quota") {
-      return "ElevenLabs returned insufficient_quota for Scribe. Check Scribe-specific limits and account access with ElevenLabs before changing plans or buying credits.";
-    }
-    if (error.providerCode === "insufficient_credits") {
-      return "ElevenLabs returned insufficient_credits for Scribe. Check the Scribe-specific credit balance and account eligibility with ElevenLabs before purchasing more credits.";
-    }
-    if (error.diagnosticCategory === "provider_free_tier_disabled") {
-      return "ElevenLabs reports that Scribe is unavailable or restricted for this free-tier account. Review account eligibility or contact support.";
-    }
-    if (error.diagnosticCategory === "provider_activity_restriction") {
-      return "ElevenLabs restricted this request because of activity or network limits. Wait and retry later, or ask support to review the restriction.";
-    }
-    if (error.diagnosticCategory === "provider_invalid_api_key") {
-      return "ElevenLabs rejected the configured API key (invalid_api_key). Verify its key and account access.";
-    }
-    if (error.diagnosticCategory === "provider_missing_permissions") {
-      return "ElevenLabs denied Scribe access (missing_permissions). Verify the key includes Scribe v1 permissions.";
-    }
-    if (error.diagnosticCategory === "provider_quota") {
-      return "ElevenLabs reported an account usage or subscription limit. Check plan, usage, and account eligibility; the exact provider code was not available.";
-    }
-    if (error.diagnosticCategory === "provider_rate_limit") {
-      return "ElevenLabs is rate-limiting transcription. Please retry in a few minutes.";
-    }
-    if (error.diagnosticCategory === "proxy_identity_unauthorized") {
-      return "Replit connector identity was denied before ElevenLabs authorization. Verify the connector proxy identity.";
-    }
-    if (error.status === 401 || error.status === 403) {
-      return `ElevenLabs Scribe access was denied (HTTP ${error.status}). Verify the configured connector and Scribe v1 access.`;
-    }
-    if (error.status === 429) {
-      return "ElevenLabs Scribe is rate-limiting requests (HTTP 429). Please retry in a few minutes.";
-    }
-    if (error.status === 408 || error.status === 425) {
-      return `ElevenLabs Scribe request timed out or was not ready (HTTP ${error.status}). Please retry.`;
-    }
-    if (error.status && error.status >= 500) {
-      return `ElevenLabs Scribe returned HTTP ${error.status}. Please retry; if it continues, verify provider availability.`;
-    }
-    return `ElevenLabs Scribe rejected the transcription request (HTTP ${error.status ?? "unknown"}). Verify Scribe v1 access and the audio format.`;
-  }
-  if (error.scribeCategory === "timeout") {
-    return "ElevenLabs Scribe did not respond within 180 seconds. The request was canceled; please retry.";
-  }
-  if (error.scribeCategory === "network") {
-    return "The ElevenLabs Scribe connector could not complete the request. Verify connector availability and retry.";
-  }
-  return `ElevenLabs Scribe returned an unexpected word-timestamp response (${error.scribeCategory}). Please retry; if it persists, verify Scribe v1 access.`;
-}
-
 async function readFileStats(path: string): Promise<{ size: number }> {
   return stat(path);
 }
@@ -1111,22 +676,138 @@ function getOpenAiClient(): OpenAI {
   const apiKey = process.env.AI_INTEGRATIONS_OPENAI_API_KEY;
   const baseURL = process.env.AI_INTEGRATIONS_OPENAI_BASE_URL;
   if (!apiKey || !baseURL) {
-    throw new Error("OpenAI transcription and scoring are not configured on this server.");
+    throw new Error("OpenAI scoring is not configured on this server.");
   }
   return new OpenAI({ apiKey, baseURL });
+}
+
+type ScoringFailureCategory =
+  | "empty_response"
+  | "invalid_json"
+  | "invalid_response_shape"
+  | "invalid_candidate_data"
+  | "provider_unavailable"
+  | "no_valid_candidates";
+type ScoringFailure = Error & {
+  scoringCategory: ScoringFailureCategory;
+  diagnostics: string[];
+};
+
+const SAFE_SCORING_FIELDS = new Set([
+  "assessment",
+  "candidates",
+  "startSeconds",
+  "endSeconds",
+  "excerpt",
+  "title",
+  "viralityScore",
+  "hookScore",
+  "storyScore",
+  "payoffScore",
+  "reason",
+  "hookReason",
+  "storyReason",
+  "payoffReason",
+]);
+
+function formatSafeZodDiagnostics(
+  issues: ReadonlyArray<{ path: ReadonlyArray<PropertyKey>; code: string }>,
+  prefix: ReadonlyArray<string | number> = [],
+): string[] {
+  return issues.slice(0, 8).map((issue) => {
+    const path = [...prefix, ...issue.path]
+      .map((part) => {
+        if (typeof part === "number") return `[${part}]`;
+        if (typeof part === "string" && SAFE_SCORING_FIELDS.has(part)) {
+          return part;
+        }
+        return "field";
+      })
+      .reduce((formatted, part) => {
+        if (part.startsWith("[")) return `${formatted}${part}`;
+        return formatted ? `${formatted}.${part}` : part;
+      }, "");
+    return `${path || "$"}:${issue.code}`;
+  });
+}
+
+function createScoringFailure(
+  scoringCategory: ScoringFailureCategory,
+  message: string,
+  diagnostics: string[] = [],
+): ScoringFailure {
+  const safeDiagnostics = diagnostics.slice(0, 12);
+  return Object.assign(
+    new Error(
+      safeDiagnostics.length
+        ? `${message} (${safeDiagnostics.join("; ")})`
+        : message,
+    ),
+    { scoringCategory, diagnostics: safeDiagnostics },
+  );
+}
+
+function scoringFailureDetails(error: unknown): {
+  category: ScoringFailureCategory | "scoring_unavailable";
+  diagnostics: string[];
+} {
+  if (
+    error instanceof Error &&
+    "scoringCategory" in error &&
+    typeof error.scoringCategory === "string" &&
+    "diagnostics" in error &&
+    Array.isArray(error.diagnostics)
+  ) {
+    return {
+      category: error.scoringCategory as ScoringFailureCategory,
+      diagnostics: error.diagnostics.filter((item): item is string => typeof item === "string"),
+    };
+  }
+  return { category: "scoring_unavailable", diagnostics: [] };
+}
+
+function parseScoringResponse(content: unknown): unknown {
+  let text: string | undefined;
+  if (typeof content === "string") {
+    text = content;
+  } else if (Array.isArray(content)) {
+    const fragments = content.flatMap((part) => {
+      if (
+        part &&
+        typeof part === "object" &&
+        "text" in part &&
+        typeof part.text === "string"
+      ) {
+        return [part.text];
+      }
+      return [];
+    });
+    if (fragments.length) text = fragments.join("\n");
+  }
+  if (!text?.trim()) {
+    throw createScoringFailure("empty_response", "Clip scoring returned no usable results.");
+  }
+  const trimmed = text.trim();
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  try {
+    return JSON.parse(fenced?.[1] ?? trimmed) as unknown;
+  } catch {
+    throw createScoringFailure("invalid_json", "Clip scoring returned an invalid JSON response.");
+  }
 }
 
 export async function scoreTranscript(
   words: TimedWord[],
   duration: number,
+  client: OpenAI = getOpenAiClient(),
 ): Promise<ScoredCandidate[]> {
-  const client = getOpenAiClient();
   if (duration < 20 && words.length) {
     return [await scoreShortTranscript(client, words, duration)];
   }
   const segments = makeTranscriptSegments(words);
   const durationBounds = getClipDurationBounds(duration);
   const results: ScoredCandidate[][] = new Array(segments.length);
+  const failedSegments: Array<{ segment: number; category: string; diagnostics: string[] }> = [];
   let next = 0;
   const workers = Array.from({ length: Math.min(2, segments.length) }, async () => {
     while (next < segments.length) {
@@ -1134,15 +815,44 @@ export async function scoreTranscript(
       next += 1;
       const segment = segments[index];
       if (!segment) continue;
-      results[index] = await withRetries(() =>
-        scoreTranscriptSegment(client, segment, duration, durationBounds),
-      );
+      try {
+        results[index] = await withRetries(
+          () => scoreTranscriptSegment(client, segment, duration, durationBounds, index + 1),
+          2,
+        );
+      } catch (error) {
+        const details = scoringFailureDetails(error);
+        results[index] = [];
+        failedSegments.push({
+          segment: index + 1,
+          category: details.category,
+          diagnostics: details.diagnostics,
+        });
+        logger.warn(
+          {
+            segment: index + 1,
+            category: details.category,
+            ...(details.diagnostics.length ? { diagnostics: details.diagnostics } : {}),
+          },
+          "Clip scoring segment failed validation",
+        );
+      }
     }
   });
-  const settled = await Promise.allSettled(workers);
-  const failed = settled.find((result) => result.status === "rejected");
-  if (failed?.status === "rejected") throw failed.reason;
-  return results.flat();
+  await Promise.all(workers);
+  const candidates = results.flat();
+  if (!candidates.length && failedSegments.length) {
+    const diagnostics = failedSegments.flatMap(({ segment, category, diagnostics: issues }) => [
+      `segments[${segment - 1}]:${category}`,
+      ...issues,
+    ]);
+    throw createScoringFailure(
+      "no_valid_candidates",
+      "Clip scoring returned no valid candidates for the voiced transcript.",
+      diagnostics,
+    );
+  }
+  return candidates;
 }
 
 export async function scoreShortTranscript(
@@ -1182,19 +892,22 @@ export async function scoreShortTranscript(
       2,
     );
   } catch {
-    throw new Error("Clip scoring is temporarily unavailable from the configured OpenAI integration.");
+    throw createScoringFailure(
+      "provider_unavailable",
+      "Clip scoring is temporarily unavailable from the configured OpenAI integration.",
+    );
   }
 
   const content = response.choices[0]?.message.content;
-  if (!content) throw new Error("Clip scoring returned no usable results.");
-  let parsedJson: unknown;
-  try {
-    parsedJson = JSON.parse(content);
-  } catch {
-    throw new Error("Clip scoring returned an invalid response.");
-  }
+  const parsedJson = parseScoringResponse(content);
   const parsed = shortScoredResponseSchema.safeParse(parsedJson);
-  if (!parsed.success) throw new Error("Clip scoring returned invalid short-source assessment data.");
+  if (!parsed.success) {
+    throw createScoringFailure(
+      "invalid_response_shape",
+      "Clip scoring returned invalid short-source assessment data.",
+      formatSafeZodDiagnostics(parsed.error.issues),
+    );
+  }
   return createShortSourceCandidate(words, duration, parsed.data.assessment);
 }
 
@@ -1238,11 +951,12 @@ function makeTranscriptSegments(words: TimedWord[]): TimedWord[][] {
   return segments;
 }
 
-async function scoreTranscriptSegment(
+export async function scoreTranscriptSegment(
   client: OpenAI,
   words: TimedWord[],
   duration: number,
   durationBounds: ClipDurationBounds,
+  segmentNumber = 1,
 ): Promise<ScoredCandidate[]> {
   const start = words[0]?.start ?? 0;
   const end = words.at(-1)?.end ?? start;
@@ -1259,7 +973,7 @@ async function scoreTranscriptSegment(
         {
           role: "system",
           content:
-            `You are a careful short-form video editor. Find up to 3 compelling, self-contained spoken moments with a hook, coherent story, and payoff. Each must be ${durationBounds.minimumSeconds.toFixed(3)}–${durationBounds.maximumSeconds.toFixed(3)} seconds, use timestamps within this provided transcript window and video duration, and provide an exact verbatim excerpt copied from the timestamped words (punctuation may vary but words may not). Do not invent speech. Score virality, hook, story, and payoff from 0–100. Give a brief evidence-based reason for each dimension. Return only JSON matching {candidates:[{startSeconds,endSeconds,excerpt,title,viralityScore,hookScore,storyScore,payoffScore,reason,hookReason,storyReason,payoffReason}]}. Titles and reasons must be concise.`,
+            `You are a careful short-form video editor. Find up to 3 compelling, self-contained spoken moments with a hook, coherent story, and payoff. Each must be ${durationBounds.minimumSeconds.toFixed(3)}–${durationBounds.maximumSeconds.toFixed(3)} seconds, use numeric timestamps within this provided transcript window and video duration, and provide an exact verbatim excerpt copied from the timestamped words (punctuation may vary but words may not). Do not invent speech. Score virality, hook, story, and payoff with JSON numbers from 0–100. Give each candidate a non-empty title and brief evidence-based reasons for all four scores. Titles should be at most 100 characters and reasons at most 400 characters. The exact excerpt may exceed 1,000 characters; include all words in the selected moment. Return only JSON matching {candidates:[{startSeconds,endSeconds,excerpt,title,viralityScore,hookScore,storyScore,payoffScore,reason,hookReason,storyReason,payoffReason}]}.`,
         },
         {
           role: "user",
@@ -1268,23 +982,66 @@ async function scoreTranscriptSegment(
       ],
     });
   } catch {
-    throw new Error("Clip scoring is temporarily unavailable from the configured OpenAI integration.");
+    throw createScoringFailure(
+      "provider_unavailable",
+      "Clip scoring is temporarily unavailable from the configured OpenAI integration.",
+    );
   }
   const content = response.choices[0]?.message.content;
-  if (!content) throw new Error("Clip scoring returned no usable results.");
-  let parsedJson: unknown;
-  try {
-    parsedJson = JSON.parse(content);
-  } catch {
-    throw new Error("Clip scoring returned an invalid response.");
+  const parsedJson = parseScoringResponse(content);
+  const envelope = scoredCandidateEnvelopeSchema.safeParse(parsedJson);
+  if (!envelope.success) {
+    throw createScoringFailure(
+      "invalid_response_shape",
+      "Clip scoring returned an invalid candidate list.",
+      formatSafeZodDiagnostics(envelope.error.issues),
+    );
   }
-  const parsed = scoredResponseSchema.safeParse(parsedJson);
-  if (!parsed.success) throw new Error("Clip scoring returned invalid candidate data.");
-  return parsed.data.candidates
-    .map((candidate) =>
-      validateCandidate(candidate, words, start, end, duration, durationBounds),
-    )
-    .filter((candidate): candidate is ScoredCandidate => candidate !== null);
+  const diagnostics: string[] = [];
+  const parsedCandidates: ScoredCandidate[] = [];
+  if (envelope.data.candidates.length > 10) {
+    diagnostics.push("candidates:too_many");
+  }
+  for (const [index, rawCandidate] of envelope.data.candidates.slice(0, 10).entries()) {
+    const parsedCandidate = scoredCandidateSchema.safeParse(rawCandidate);
+    if (!parsedCandidate.success) {
+      diagnostics.push(
+        ...formatSafeZodDiagnostics(parsedCandidate.error.issues, ["candidates", index]),
+      );
+      continue;
+    }
+    const verified = validateCandidate(
+      parsedCandidate.data,
+      words,
+      start,
+      end,
+      duration,
+      durationBounds,
+    );
+    if (!verified) {
+      diagnostics.push(`candidates[${index}]:unverifiable`);
+      continue;
+    }
+    parsedCandidates.push(verified);
+  }
+  if (diagnostics.length) {
+    logger.warn(
+      {
+        segment: segmentNumber,
+        diagnosticCount: diagnostics.length,
+        diagnostics: diagnostics.slice(0, 12),
+      },
+      "Clip scoring candidates were rejected",
+    );
+  }
+  if (!parsedCandidates.length && envelope.data.candidates.length) {
+    throw createScoringFailure(
+      "invalid_candidate_data",
+      "Clip scoring returned no verifiable candidates.",
+      diagnostics.length ? diagnostics : ["candidates:no_verifiable_candidates"],
+    );
+  }
+  return parsedCandidates;
 }
 
 export function getClipDurationBounds(sourceDuration: number): ClipDurationBounds {
@@ -1376,14 +1133,35 @@ export function validateCandidate(
   duration: number,
   durationBounds: ClipDurationBounds,
 ): ScoredCandidate | null {
-  const requestedStart = Math.max(windowStart, 0, candidate.startSeconds);
-  const requestedEnd = Math.min(windowEnd, duration, candidate.endSeconds);
+  const requestedStart = candidate.startSeconds;
+  const requestedEnd = candidate.endSeconds;
+  const scores = [
+    candidate.viralityScore,
+    candidate.hookScore,
+    candidate.storyScore,
+    candidate.payoffScore,
+  ];
   if (
     !Number.isFinite(requestedStart) ||
     !Number.isFinite(requestedEnd) ||
-    requestedEnd <= requestedStart ||
+    requestedStart < 0 ||
     requestedStart < windowStart ||
-    requestedEnd > windowEnd
+    requestedEnd > windowEnd ||
+    requestedEnd > duration ||
+    requestedEnd <= requestedStart ||
+    !candidate.title?.trim() ||
+    !candidate.excerpt?.trim() ||
+    scores.some(
+      (score) =>
+        typeof score !== "number" ||
+        !Number.isFinite(score) ||
+        score < 0 ||
+        score > 100,
+    ) ||
+    !candidate.reason?.trim() ||
+    !candidate.hookReason?.trim() ||
+    !candidate.storyReason?.trim() ||
+    !candidate.payoffReason?.trim()
   ) return null;
   const overlapping = words.filter(
     (word) => word.end > requestedStart && word.start < requestedEnd,

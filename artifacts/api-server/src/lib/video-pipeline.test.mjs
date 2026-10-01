@@ -7,23 +7,22 @@ const {
   chooseNonOverlapping,
   createNoSpeechCandidate,
   createShortSourceCandidate,
-  classifyScribeErrorPayload,
   getClipDurationBounds,
+  isVideoPipelineReady,
   LOCAL_MEDIA_PROTOCOL_WHITELIST_ARGS,
   scoreShortTranscript,
   selectCandidatesForProcessing,
   selectClipCandidates,
-  extractTimedScribeWords,
-  formatScribeFailureForUser,
-  transcribeScribeChunk,
-  transcribeScribeWords,
+  scoreTranscript,
+  scoreTranscriptSegment,
   withJobAdvisoryLock,
   validateProbe,
   validateCandidate,
 } = await import("./video-pipeline.ts");
 const { createAssCaptions } = await import("./video-captions.ts");
+const { isLocalTranscriptionReady } = await import("./video-transcription-local.ts");
 
-const sampleScribeWords = [
+const sampleTimedWords = [
   { text: "Underneath", start: 0.14, end: 0.7 },
   { text: "the", start: 0.74, end: 0.84 },
   { text: "city", start: 0.92, end: 1.2 },
@@ -110,7 +109,7 @@ test("short-source AI assessment is one full-source clip with transcript-derived
     },
   };
 
-  const scored = await scoreShortTranscript(client, sampleScribeWords, 10.005333);
+  const scored = await scoreShortTranscript(client, sampleTimedWords, 10.005333);
 
   assert.equal(callCount, 1);
   assert.deepEqual(
@@ -130,7 +129,7 @@ test("short-source AI assessment is one full-source clip with transcript-derived
 });
 
 test("short sources bypass selective candidate filtering and do not silently empty-fallback", () => {
-  const scored = createShortSourceCandidate(sampleScribeWords, 10.005333, {
+  const scored = createShortSourceCandidate(sampleTimedWords, 10.005333, {
     title: "City Lights",
     viralityScore: 14,
     hookScore: 8,
@@ -142,11 +141,11 @@ test("short sources bypass selective candidate filtering and do not silently emp
     payoffReason: "It has no clear resolution.",
   });
   assert.deepEqual(
-    selectCandidatesForProcessing(sampleScribeWords, 10.005333, null, [scored], 8),
+    selectCandidatesForProcessing(sampleTimedWords, 10.005333, null, [scored], 8),
     [scored],
   );
   assert.throws(
-    () => selectCandidatesForProcessing(sampleScribeWords, 10.005333, null, [], 8),
+    () => selectCandidatesForProcessing(sampleTimedWords, 10.005333, null, [], 8),
     /did not return an assessment/i,
   );
   assert.throws(
@@ -180,10 +179,182 @@ test("short-source scoring retries at most once", async () => {
   };
 
   await assert.rejects(
-    scoreShortTranscript(client, sampleScribeWords, 10.005333),
+    scoreShortTranscript(client, sampleTimedWords, 10.005333),
     /temporarily unavailable/i,
   );
   assert.equal(callCount, 2);
+});
+
+test("candidate parsing keeps valid peers, accepts numeric strings, and allows full excerpts over 1000 characters", async () => {
+  const words = Array.from({ length: 101 }, (_unused, index) => {
+    const start = index * 0.2;
+    return {
+      text: `authenticword${String(index).padStart(3, "0")}`,
+      start,
+      end: start + 0.2,
+    };
+  });
+  const excerpt = words.map(({ text }) => text).join(" ");
+  assert.ok(excerpt.length > 1_000);
+  const validCandidate = {
+    startSeconds: "0",
+    endSeconds: "20.2",
+    excerpt,
+    title: "Long but legitimate model title ".repeat(5),
+    viralityScore: "75.5",
+    hookScore: "70",
+    storyScore: "65",
+    payoffScore: "80",
+    reason: "Evidence-backed overall assessment. ".repeat(80),
+    hookReason: "Evidence-backed hook. ".repeat(30),
+    storyReason: "Evidence-backed story. ".repeat(30),
+    payoffReason: "Evidence-backed payoff. ".repeat(30),
+  };
+  const invalidPeer = {
+    ...validCandidate,
+    viralityScore: "not-a-number",
+    title: "",
+  };
+  const client = {
+    chat: {
+      completions: {
+        async create() {
+          return {
+            choices: [{
+              message: {
+                content: JSON.stringify({ candidates: [invalidPeer, validCandidate] }),
+              },
+            }],
+          };
+        },
+      },
+    },
+  };
+
+  const candidates = await scoreTranscriptSegment(
+    client,
+    words,
+    120,
+    getClipDurationBounds(120),
+  );
+
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0].excerpt, excerpt);
+  assert.equal(candidates[0].viralityScore, 75.5);
+  assert.equal(candidates[0].title.length, 100);
+  assert.equal(candidates[0].reason.length, 1_000);
+  assert.equal(candidates[0].hookReason.length, 400);
+});
+
+test("invalid candidate diagnostics expose safe field paths and zod codes only", async () => {
+  const words = Array.from({ length: 101 }, (_unused, index) => {
+    const start = index * 0.2;
+    return { text: `spokenword${index}`, start, end: start + 0.2 };
+  });
+  const invalidCandidate = {
+    startSeconds: 0,
+    endSeconds: 20.2,
+    excerpt: "private transcript text must not appear in diagnostics",
+    title: "private model title must not appear in diagnostics",
+    viralityScore: 101,
+    hookScore: 50,
+    storyScore: 50,
+    payoffScore: 50,
+    reason: "reason",
+    hookReason: "hook",
+    storyReason: "story",
+    payoffReason: "payoff",
+  };
+  const client = {
+    chat: {
+      completions: {
+        async create() {
+          return {
+            choices: [{
+              message: { content: JSON.stringify({ candidates: [invalidCandidate] }) },
+            }],
+          };
+        },
+      },
+    },
+  };
+
+  await assert.rejects(
+    scoreTranscriptSegment(client, words, 120, getClipDurationBounds(120)),
+    (error) => {
+      assert.match(error.message, /candidates\[0\]\.viralityScore:too_big/);
+      assert.doesNotMatch(error.message, /private transcript text|private model title/);
+      return true;
+    },
+  );
+});
+
+test("a malformed scoring segment does not discard valid candidates from peer segments", async () => {
+  const words = Array.from({ length: 240 }, (_unused, index) => {
+    const start = index * 0.3;
+    const text = `transcriptword${String(index).padStart(4, "0")}`.repeat(5);
+    return { text, start, end: start + 0.22 };
+  });
+  let callCount = 0;
+  const client = {
+    chat: {
+      completions: {
+        async create({ messages }) {
+          callCount += 1;
+          const userMessage = messages.find(({ role }) => role === "user").content;
+          const transcript = userMessage.split("Timestamped transcript:\n")[1];
+          const lines = transcript.split("\n");
+          const parsedWords = lines.map((line) => {
+            const match = line.match(/^([\d.]+)-([\d.]+) (.*)$/);
+            assert.ok(match);
+            return { start: Number(match[1]), end: Number(match[2]), text: match[3] };
+          });
+          if (parsedWords[0].start === 0) {
+            return {
+              choices: [{
+                message: {
+                  content: JSON.stringify({
+                    candidates: [{
+                      startSeconds: "invalid",
+                      endSeconds: 20,
+                      excerpt: "malformed candidate",
+                    }],
+                  }),
+                },
+              }],
+            };
+          }
+          const first = parsedWords[0];
+          const last = parsedWords.at(-1);
+          const candidate = {
+            startSeconds: first.start,
+            endSeconds: last.end,
+            excerpt: parsedWords.map(({ text }) => text).join(" "),
+            title: "Verified segment",
+            viralityScore: 75,
+            hookScore: 70,
+            storyScore: 65,
+            payoffScore: 80,
+            reason: "The transcript supports this assessment.",
+            hookReason: "The segment begins with a hook.",
+            storyReason: "The segment tells a coherent story.",
+            payoffReason: "The segment has a clear payoff.",
+          };
+          return {
+            choices: [{
+              message: { content: JSON.stringify({ candidates: [candidate] }) },
+            }],
+          };
+        },
+      },
+    },
+  };
+
+  const candidates = await scoreTranscript(words, 120, client);
+
+  assert.ok(callCount >= 3);
+  assert.ok(candidates.length > 0);
+  assert.ok(candidates.every(({ startSeconds }) => startSeconds > 0));
 });
 
 test("local media input protocol allowlist permits files and pipes only", () => {
@@ -193,237 +364,54 @@ test("local media input protocol allowlist permits files and pipes only", () => 
   ]);
 });
 
-test("Scribe request timeout aborts a hung proxy fetch", async () => {
-  let wasAborted = false;
-  const proxyFetch = async (_url, init) =>
-    new Promise((_resolve, reject) => {
-      init.signal.addEventListener(
-        "abort",
-        () => {
-          wasAborted = true;
-          reject(init.signal.reason);
-        },
-        { once: true },
-      );
-    });
-
-  await assert.rejects(
-    transcribeScribeChunk(Buffer.from("audio"), proxyFetch, 15),
-    /Scribe transcription exceeded its request deadline/i,
-  );
-  assert.equal(wasAborted, true);
-});
-
-test("Scribe request deadline includes a stalled response body", async () => {
-  let wasAborted = false;
-  const proxyFetch = async (_url, init) => ({
-    ok: true,
-    status: 200,
-    json() {
-      return new Promise((_resolve, reject) => {
-        init.signal.addEventListener(
-          "abort",
-          () => {
-            wasAborted = true;
-            reject(init.signal.reason);
-          },
-          { once: true },
-        );
-      });
-    },
-  });
-
-  await assert.rejects(
-    transcribeScribeChunk(Buffer.from("audio"), proxyFetch, 15),
-    /Scribe transcription exceeded its request deadline/i,
-  );
-  assert.equal(wasAborted, true);
-});
-
-test("Scribe retries transient provider status once and accepts real timed words", async () => {
-  let callCount = 0;
-  const proxyFetch = async () => {
-    callCount += 1;
-    if (callCount === 1) return new Response("", { status: 503 });
-    return new Response(
-      JSON.stringify({
-        words: [
-          { text: "spoken", start: 0.25, end: 0.7, type: "word" },
-          { text: " ", start: null, end: null, type: "spacing" },
-          { text: "laughing", start: null, end: null, type: "audio_event" },
-        ],
-      }),
-      { status: 200, headers: { "Content-Type": "application/json" } },
-    );
+test("video readiness requires configured local scoring and storage prerequisites", () => {
+  const previous = {
+    apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
+    baseUrl: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
+    storage: process.env.PRIVATE_OBJECT_DIR,
   };
-  const failures = [];
-
-  const words = await transcribeScribeWords(
-    Buffer.from("audio"),
-    proxyFetch,
-    1_000,
-    (failure) => failures.push({
-      category: failure.scribeCategory,
-      status: failure.status,
-    }),
-  );
-
-  assert.equal(callCount, 2);
-  assert.deepEqual(failures, [{ category: "http_status", status: 503 }]);
-  assert.deepEqual(words, [{ text: "spoken", start: 0.25, end: 0.7 }]);
+  try {
+    delete process.env.AI_INTEGRATIONS_OPENAI_API_KEY;
+    delete process.env.AI_INTEGRATIONS_OPENAI_BASE_URL;
+    delete process.env.PRIVATE_OBJECT_DIR;
+    assert.equal(isVideoPipelineReady(), false);
+  } finally {
+    if (previous.apiKey === undefined) delete process.env.AI_INTEGRATIONS_OPENAI_API_KEY;
+    else process.env.AI_INTEGRATIONS_OPENAI_API_KEY = previous.apiKey;
+    if (previous.baseUrl === undefined) delete process.env.AI_INTEGRATIONS_OPENAI_BASE_URL;
+    else process.env.AI_INTEGRATIONS_OPENAI_BASE_URL = previous.baseUrl;
+    if (previous.storage === undefined) delete process.env.PRIVATE_OBJECT_DIR;
+    else process.env.PRIVATE_OBJECT_DIR = previous.storage;
+  }
 });
 
-test("Scribe access errors retain only safe status/category diagnostics and are not retried", async () => {
-  let callCount = 0;
-  const failures = [];
-  const proxyFetch = async () => {
-    callCount += 1;
-    return new Response(
-      JSON.stringify({
-        detail: {
-          status: "invalid_api_key",
-          message: "provider raw text must not be exposed",
-        },
-      }),
-      { status: 401, headers: { "Content-Type": "application/json" } },
-    );
+test("video readiness reflects local model files without issuing provider requests", () => {
+  const previous = {
+    apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
+    baseUrl: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
+    storage: process.env.PRIVATE_OBJECT_DIR,
   };
-  let finalFailure;
-
-  await assert.rejects(
-    transcribeScribeWords(Buffer.from("audio"), proxyFetch, 1_000, (failure) => {
-      failures.push({
-        category: failure.scribeCategory,
-        status: failure.status,
-        diagnosticCategory: failure.diagnosticCategory,
-      });
-    }),
-    (error) => {
-      finalFailure = error;
-      return error.scribeCategory === "http_status" && error.status === 401;
-    },
-  );
-  assert.equal(callCount, 1);
-  assert.deepEqual(failures, [{
-    category: "http_status",
-    status: 401,
-    diagnosticCategory: "provider_invalid_api_key",
-  }]);
-  const safeMessage = formatScribeFailureForUser(finalFailure);
-  assert.match(safeMessage, /invalid_api_key/i);
-  assert.doesNotMatch(safeMessage, /provider raw text must not be exposed/i);
+  try {
+    process.env.AI_INTEGRATIONS_OPENAI_API_KEY = "test-key";
+    process.env.AI_INTEGRATIONS_OPENAI_BASE_URL = "http://localhost.invalid/v1";
+    process.env.PRIVATE_OBJECT_DIR = "/tmp/clipwise-test-objects";
+    assert.equal(isVideoPipelineReady(), isLocalTranscriptionReady());
+  } finally {
+    if (previous.apiKey === undefined) delete process.env.AI_INTEGRATIONS_OPENAI_API_KEY;
+    else process.env.AI_INTEGRATIONS_OPENAI_API_KEY = previous.apiKey;
+    if (previous.baseUrl === undefined) delete process.env.AI_INTEGRATIONS_OPENAI_BASE_URL;
+    else process.env.AI_INTEGRATIONS_OPENAI_BASE_URL = previous.baseUrl;
+    if (previous.storage === undefined) delete process.env.PRIVATE_OBJECT_DIR;
+    else process.env.PRIVATE_OBJECT_DIR = previous.storage;
+  }
 });
 
-test("safe Scribe error classification distinguishes provider and proxy auth failures", () => {
-  assert.equal(
-    classifyScribeErrorPayload(
-      { detail: { status: "missing_permissions", message: "omitted" } },
-      401,
-    ),
-    "provider_missing_permissions",
-  );
-  assert.equal(
-    classifyScribeErrorPayload(
-      { error: { code: "quota_exceeded", message: "omitted" } },
-      401,
-    ),
-    "provider_quota",
-  );
-  assert.equal(
-    classifyScribeErrorPayload(
-      { error: "Replit identity token is invalid" },
-      401,
-    ),
-    "proxy_identity_unauthorized",
-  );
-  assert.equal(classifyScribeErrorPayload({ error: "unauthorized" }, 401), "unauthorized_unknown");
-  assert.equal(
-    classifyScribeErrorPayload(
-      { detail: { status: "free_tier_disabled", message: "restricted" } },
-      401,
-    ),
-    "provider_free_tier_disabled",
-  );
-  assert.equal(
-    classifyScribeErrorPayload(
-      { detail: { status: "free_tier_contention", message: "restricted" } },
-      401,
-    ),
-    "provider_activity_restriction",
-  );
-  assert.equal(
-    classifyScribeErrorPayload(
-      { detail: { status: "insufficient_credits", message: "omitted" } },
-      401,
-    ),
-    "provider_insufficient_credits",
-  );
-});
-
-test("quota_exceeded wording does not claim overall usage is exhausted or direct a purchase", () => {
-  const message = formatScribeFailureForUser({
-    scribeCategory: "http_status",
-    status: 401,
-    diagnosticCategory: "provider_quota",
-    providerCode: "quota_exceeded",
-    retryable: false,
-  });
-  assert.match(message, /Scribe-specific or free-tier limits/i);
-  assert.match(message, /does not prove the overall account quota is exhausted/i);
-  assert.match(message, /before changing plans or buying credits/i);
-});
-
-test("a safe free-tier error code produces a restriction message, not a quota claim", async () => {
-  const proxyFetch = async () =>
-    new Response(
-      JSON.stringify({
-        detail: {
-          status: "free_tier_disabled",
-          message: "private provider wording is intentionally omitted",
-        },
-      }),
-      { status: 401, headers: { "Content-Type": "application/json" } },
-    );
-  let failure;
-
-  await assert.rejects(
-    transcribeScribeWords(Buffer.from("audio"), proxyFetch, 1_000),
-    (error) => {
-      failure = error;
-      return error.providerCode === "free_tier_disabled";
-    },
-  );
-  const safeMessage = formatScribeFailureForUser(failure);
-  assert.match(safeMessage, /free-tier account/i);
-  assert.match(safeMessage, /not a usage-quota diagnosis/i);
-  assert.doesNotMatch(safeMessage, /private provider wording/i);
-});
-
-test("Scribe ignores untimed non-word events but retries malformed speech timestamps", () => {
-  assert.deepEqual(
-    extractTimedScribeWords({
-      words: [
-        { text: " ", type: "spacing", start: null, end: null },
-        { text: "laughing", type: "audio_event" },
-      ],
-    }),
-    [],
-  );
-  assert.throws(
-    () =>
-      extractTimedScribeWords({
-        words: [{ text: "spoken", type: "word", start: null, end: null }],
-      }),
-    /valid timestamps/i,
-  );
-});
-
-test("an authentic 10-second Scribe transcript can validate as a playable clip", () => {
+test("a timed 10-second transcript can validate as a playable clip", () => {
   const duration = 10.005333;
   const bounds = getClipDurationBounds(duration);
   const accepted = validateCandidate(
     candidate(0.14, 9.5, 75, sampleTranscript),
-    sampleScribeWords,
+    sampleTimedWords,
     0,
     duration,
     duration,
@@ -445,7 +433,7 @@ test("short speech excerpts below the meaningful duration bound are rejected", (
       75,
       "Underneath the city lights, we come alive.",
     ),
-    sampleScribeWords.slice(0, 7),
+    sampleTimedWords.slice(0, 7),
     0,
     10.005333,
     10.005333,
@@ -453,6 +441,21 @@ test("short speech excerpts below the meaningful duration bound are rejected", (
   );
 
   assert.equal(accepted, null);
+});
+
+test("candidate validation rejects invented ranges, invalid scores, and missing evidence", () => {
+  const duration = 10.005333;
+  const bounds = getClipDurationBounds(duration);
+  const validCandidate = candidate(0.14, 9.5, 75, sampleTranscript);
+  const validate = (value) =>
+    validateCandidate(value, sampleTimedWords, 0, duration, duration, bounds);
+
+  assert.equal(validate({ ...validCandidate, startSeconds: -1 }), null);
+  assert.equal(validate({ ...validCandidate, endSeconds: duration + 1 }), null);
+  assert.equal(validate({ ...validCandidate, viralityScore: 101 }), null);
+  assert.equal(validate({ ...validCandidate, title: "  " }), null);
+  assert.equal(validate({ ...validCandidate, hookReason: "" }), null);
+  assert.ok(validate(validCandidate));
 });
 
 test("sources long enough for ordinary clips retain the 20–90 second limits", () => {
@@ -481,7 +484,7 @@ test("requested clip count is a maximum and overlapping moments are not duplicat
   );
 });
 
-test("a successful empty Scribe result yields one unscored source clip, capped at 90 seconds", () => {
+test("a successful empty transcript yields one unscored source clip, capped at 90 seconds", () => {
   const shortFallback = selectClipCandidates([], 10.005333, "Source title", [], 8);
   assert.equal(shortFallback.length, 1);
   assert.deepEqual(

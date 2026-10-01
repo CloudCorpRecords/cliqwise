@@ -1,6 +1,6 @@
 ---
 name: Managed provider compatibility
-description: Why Clipwise uses authenticated provider proxy calls and a separate word-timestamp transcription provider.
+description: Historical managed-provider constraints and how to diagnose provider authorization without unnecessary reconnection.
 ---
 
 Treat the current connection's returned SDK instructions as authoritative. A connected generic Stripe OAuth integration may support authenticated proxy requests while exposing no raw secret key.
@@ -9,11 +9,11 @@ Treat the current connection's returned SDK instructions as authoritative. A con
 
 **How to apply:** Use the connected provider's managed proxy without requesting another credential or reconnecting a healthy connection. Keep payment grants tied to provider-confirmed paid sessions, authenticated event retrieval, and transactional idempotency.
 
-Use a provider that actually emits word-level timestamps for Clipwise's captions; do not infer timestamps from text or silently replace precise alignment.
+If considering an external transcription service again, verify that it actually emits word-level timestamps; do not infer timestamps from text.
 
 **Why:** The managed OpenAI proxy rejected Whisper as an unsupported model. A supported text-only transcription response is insufficient for animated word-highlight captions.
 
-**How to apply:** Use the connected ElevenLabs transcription service, keeping OpenAI for moment scoring. Verify capability changes against the live provider and update this note if support changes.
+**How to apply:** Current transcription is local by user decision; see local-transcription-runtime.md. Keep OpenAI for scoring. Do not reintroduce a provider dependency without user agreement and a real timestamp-capability check.
 
 Do not infer Scribe access from successful model/subscription reads or the general character allowance.
 
