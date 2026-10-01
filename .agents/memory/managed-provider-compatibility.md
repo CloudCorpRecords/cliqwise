@@ -14,3 +14,9 @@ Use a provider that actually emits word-level timestamps for Clipwise's captions
 **Why:** The managed OpenAI proxy rejected Whisper as an unsupported model. A supported text-only transcription response is insufficient for animated word-highlight captions.
 
 **How to apply:** Use the connected ElevenLabs transcription service, keeping OpenAI for moment scoring. Verify capability changes against the live provider and update this note if support changes.
+
+Do not infer Scribe access from successful model/subscription reads or the general character allowance.
+
+**Why:** Scribe returned HTTP 401 with the exact provider code `quota_exceeded` while model/subscription reads succeeded and the account was below its general character limit. Reconnecting a healthy API-key connection or claiming overall quota exhaustion would be unsupported.
+
+**How to apply:** Preserve safe provider error codes and diagnose speech-to-text-specific access/limits. Do not fake timestamps, hide a provider failure as no speech, or mark export verification complete when transcription is blocked.

@@ -85,20 +85,20 @@ function serializeClip(row: {
   id: string;
   title: string;
   duration_seconds: string | number;
-  virality_score: string | number;
-  hook_score: string | number;
-  story_score: string | number;
-  payoff_score: string | number;
+  virality_score: string | number | null;
+  hook_score: string | number | null;
+  story_score: string | number | null;
+  payoff_score: string | number | null;
   transcript: string;
 }): Record<string, unknown> {
   return {
     id: row.id,
     title: row.title,
     durationSeconds: numberValue(row.duration_seconds),
-    viralityScore: numberValue(row.virality_score),
-    hookScore: numberValue(row.hook_score),
-    storyScore: numberValue(row.story_score),
-    payoffScore: numberValue(row.payoff_score),
+    viralityScore: row.virality_score == null ? null : numberValue(row.virality_score),
+    hookScore: row.hook_score == null ? null : numberValue(row.hook_score),
+    storyScore: row.story_score == null ? null : numberValue(row.story_score),
+    payoffScore: row.payoff_score == null ? null : numberValue(row.payoff_score),
     transcript: row.transcript,
     downloadUrl: clipContentUrl(row.id, true),
     previewUrl: clipContentUrl(row.id),
@@ -177,15 +177,15 @@ export async function getJobForUser(
     id: string;
     title: string;
     duration_seconds: string | number;
-    virality_score: string | number;
-    hook_score: string | number;
-    story_score: string | number;
-    payoff_score: string | number;
+    virality_score: string | number | null;
+    hook_score: string | number | null;
+    story_score: string | number | null;
+    payoff_score: string | number | null;
     transcript: string;
   }>(
     `SELECT id, title, duration_seconds, virality_score, hook_score,
             story_score, payoff_score, transcript
-     FROM cw_clips WHERE job_id = $1 ORDER BY virality_score DESC, id`,
+     FROM cw_clips WHERE job_id = $1 ORDER BY virality_score DESC NULLS LAST, id`,
     [id],
   );
   return serializeJob(job, clips.rows);

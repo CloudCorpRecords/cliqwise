@@ -10,7 +10,8 @@ export function Logo({ light = false, href = '/' }: { light?: boolean; href?: st
 export function Eyebrow({ children }: { children: React.ReactNode }) {
   return <p className="font-mono text-xs uppercase tracking-[0.18em] text-primary">{children}</p>;
 }
-export function ScoreBar({ label, value }: { label: string; value: number }) {
+export function ScoreBar({ label, value }: { label: string; value: number | null }) {
+  if (value === null) return <p className="font-mono text-[11px] text-muted-foreground">{label}: not scored</p>;
   const v = Math.max(0, Math.min(100, value));
   return (
     <div>

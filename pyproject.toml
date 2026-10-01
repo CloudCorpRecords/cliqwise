@@ -1,0 +1,8 @@
+[project]
+name = "repl-nix-workspace"
+version = "0.1.0"
+description = "Maintained YouTube downloader for Clipwise's Node API"
+requires-python = ">=3.12"
+dependencies = [
+    "yt-dlp>=2026.8.19",
+]

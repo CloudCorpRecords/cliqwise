@@ -10,10 +10,17 @@ export interface Clip {
   id: string;
   title: string;
   durationSeconds: number;
-  viralityScore: number;
-  hookScore: number;
-  storyScore: number;
-  payoffScore: number;
+  /**
+     * Null when no speech was detected and the export is unscored.
+     * @nullable
+     */
+  viralityScore: number | null;
+  /** @nullable */
+  hookScore: number | null;
+  /** @nullable */
+  storyScore: number | null;
+  /** @nullable */
+  payoffScore: number | null;
   transcript: string;
   downloadUrl: string;
   previewUrl: string;

@@ -96,18 +96,10 @@ export const cwClips = pgTable(
       precision: 12,
       scale: 3,
     }).notNull(),
-    viralityScore: numeric("virality_score", { precision: 8, scale: 3 })
-      .notNull()
-      .default("0"),
-    hookScore: numeric("hook_score", { precision: 8, scale: 3 })
-      .notNull()
-      .default("0"),
-    storyScore: numeric("story_score", { precision: 8, scale: 3 })
-      .notNull()
-      .default("0"),
-    payoffScore: numeric("payoff_score", { precision: 8, scale: 3 })
-      .notNull()
-      .default("0"),
+    viralityScore: numeric("virality_score", { precision: 8, scale: 3 }),
+    hookScore: numeric("hook_score", { precision: 8, scale: 3 }),
+    storyScore: numeric("story_score", { precision: 8, scale: 3 }),
+    payoffScore: numeric("payoff_score", { precision: 8, scale: 3 }),
     transcript: text("transcript").notNull().default(""),
     objectPath: text("object_path").notNull(),
     scoreReason: text("score_reason").notNull().default(""),

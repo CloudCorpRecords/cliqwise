@@ -20,7 +20,7 @@ function ClipCard({ c, i, wm }: { c: Clip; i: number; wm: boolean }) {
       <div className="space-y-4 p-4">
         <div className="flex items-start justify-between gap-3">
           <h3 className="font-display text-lg font-bold leading-tight">{c.title}</h3>
-          <div className="text-right"><p className="font-display text-3xl font-extrabold text-primary" data-testid={`text-virality-${c.id}`}>{Math.round(c.viralityScore)}</p><p className="font-mono text-[10px] uppercase text-muted-foreground">virality</p></div>
+          <div className="text-right"><p className="font-display text-3xl font-extrabold text-primary" data-testid={`text-virality-${c.id}`}>{c.viralityScore === null ? '—' : Math.round(c.viralityScore)}</p><p className="font-mono text-[10px] uppercase text-muted-foreground">{c.viralityScore === null ? 'not scored' : 'virality'}</p></div>
         </div>
         <p className="font-mono text-xs text-muted-foreground">{fmtDur(c.durationSeconds)}{wm ? ' - watermarked' : ''}</p>
         <div className="grid grid-cols-3 gap-3"><ScoreBar label="Hook" value={c.hookScore} /><ScoreBar label="Story" value={c.storyScore} /><ScoreBar label="Payoff" value={c.payoffScore} /></div>
@@ -28,7 +28,7 @@ function ClipCard({ c, i, wm }: { c: Clip; i: number; wm: boolean }) {
         <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} data-testid={`button-transcript-${c.id}`} className="flex w-full items-center justify-between text-sm font-medium">
           Transcript <ChevronDown className={`h-4 w-4 transition ${open ? 'rotate-180' : ''}`} />
         </button>
-        {open && <p className="max-h-48 overflow-auto rounded-lg bg-muted p-3 text-sm leading-relaxed" data-testid={`text-transcript-${c.id}`}>{c.transcript}</p>}
+        {open && <p className="max-h-48 overflow-auto rounded-lg bg-muted p-3 text-sm leading-relaxed" data-testid={`text-transcript-${c.id}`}>{c.transcript || 'No speech detected. Original audio is preserved; captions and speech scores are not available.'}</p>}
       </div>
     </article>
   );
@@ -60,8 +60,13 @@ export default function JobDetail() {
             {j.status === 'failed' && <p className="mt-5 rounded-lg bg-destructive p-3 text-sm text-destructive-foreground" role="alert" data-testid="text-job-error">{j.error || 'This job failed.'}</p>}
           </div>
           {j.status === 'completed' && j.clips.length === 0 && <Empty title="No clips returned" body="The job finished without any clips." />}
+          {j.status === 'completed' && j.clips.length > 0 && j.clips.length < j.numberOfClips && (
+            <p className="mb-5 text-sm text-muted-foreground" data-testid="text-fewer-clips">
+              Created {j.clips.length} of up to {j.numberOfClips} clips. This source had fewer usable, non-overlapping moments.
+            </p>
+          )}
           <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
-            {[...j.clips].sort((a, b) => b.viralityScore - a.viralityScore).map((c, i) => <ClipCard key={c.id} c={c} i={i} wm={j.watermarked} />)}
+            {[...j.clips].sort((a, b) => (b.viralityScore ?? -1) - (a.viralityScore ?? -1)).map((c, i) => <ClipCard key={c.id} c={c} i={i} wm={j.watermarked} />)}
           </div>
         </>
       )}

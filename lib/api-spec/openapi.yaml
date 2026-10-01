@@ -172,10 +172,10 @@ components:
         id: {type: string}
         title: {type: string}
         durationSeconds: {type: number}
-        viralityScore: {type: number}
-        hookScore: {type: number}
-        storyScore: {type: number}
-        payoffScore: {type: number}
+        viralityScore: {type: [number, "null"], description: "Null when no speech was detected and the export is unscored."}
+        hookScore: {type: [number, "null"]}
+        storyScore: {type: [number, "null"]}
+        payoffScore: {type: [number, "null"]}
         transcript: {type: string}
         downloadUrl: {type: string}
         previewUrl: {type: string}

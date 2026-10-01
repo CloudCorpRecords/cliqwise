@@ -7,6 +7,8 @@
     "dev": "export NODE_ENV=development && pnpm run build && pnpm run start",
     "build": "node ./build.mjs",
     "start": "node --enable-source-maps ./dist/index.mjs",
+    "test:video": "node test/run-video-tests.mjs",
+    "test:integration:clipwise-store": "esbuild test/clipwise-store.integration.test.mjs --bundle --platform=node --format=esm --banner:js='import { createRequire as __bannerCrReq } from \"node:module\"; import __bannerPath from \"node:path\"; import __bannerUrl from \"node:url\"; globalThis.require=__bannerCrReq(import.meta.url); globalThis.__filename=__bannerUrl.fileURLToPath(import.meta.url); globalThis.__dirname=__bannerPath.dirname(globalThis.__filename);' --outfile=.test-dist/clipwise-store.integration.test.mjs && NODE_ENV=development node --test .test-dist/clipwise-store.integration.test.mjs; status=$?; rm -rf .test-dist; exit $status",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

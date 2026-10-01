@@ -16,6 +16,7 @@ import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useToast } from '@/hooks/use-toast';
 import { ago, bytes, dt, errMsg } from '@/lib/format';
+import { uploadVideo, videoContentType } from '@/lib/video-upload';
 
 const styles = [
   { v: 'bold', t: 'Bold', d: 'Big stacked words, high contrast.' },
@@ -27,18 +28,6 @@ const sources = [
   { v: 'paid', t: 'Paid only', d: 'Paid minutes only. No watermark.' },
   { v: 'free', t: 'Free only', d: 'Monthly free minutes. Output is watermarked.' },
 ] as const;
-
-function uploadPut(url: string, file: File, onP: (p: number) => void) {
-  return new Promise<void>((res, rej) => {
-    const x = new XMLHttpRequest();
-    x.open('PUT', url);
-    x.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
-    x.upload.onprogress = (e) => e.lengthComputable && onP(e.loaded / e.total);
-    x.onload = () => (x.status < 300 ? res() : rej(new Error(`Upload failed (${x.status})`)));
-    x.onerror = () => rej(new Error('Upload failed. Check your connection and retry.'));
-    x.send(file);
-  });
-}
 
 export default function Dashboard() {
   const { user } = useUser();
@@ -70,19 +59,24 @@ export default function Dashboard() {
 
   const pick = (f?: File | null) => {
     if (!f) return undefined;
+    if (!f.size || !videoContentType(f)) { toast({ title: 'Choose a video file', description: 'Select a nonempty MP4, MOV, WebM, MKV, AVI or MPEG video.', variant: 'destructive' }); return undefined; }
     if (f.size > maxBytes) { toast({ title: 'File too large', description: `Limit is ${bytes(maxBytes)}.`, variant: 'destructive' }); return undefined; }
     setFile(f);
     if (!title) setTitle(f.name.replace(/\.[^.]+$/, '').slice(0, 200));
   };
 
   const go = async () => {
+    if (busy || !ready) return;
     setBusy(true);
     try {
       const body: VideoInput = { title: title.trim() || undefined, numberOfClips: clips, captionStyle: style, creditSource: source };
       if (mode === 'file' && file) {
-        const t = await ticket.mutateAsync({ data: { name: file.name, size: file.size, contentType: file.type || 'application/octet-stream' } });
+        const contentType = videoContentType(file);
+        if (!contentType) throw new Error('Choose a supported video file.');
+        const t = await ticket.mutateAsync({ data: { name: file.name, size: file.size, contentType } });
         setProg(0);
-        await uploadPut(t.uploadURL, file, setProg);
+        await uploadVideo(t.uploadURL, file, contentType, setProg);
+        setProg(null);
         body.objectPath = t.objectPath;
       } else body.videoUrl = url.trim();
       const job = await submit.mutateAsync({ data: body });
@@ -151,14 +145,17 @@ export default function Dashboard() {
             {mode === 'file' ? (
               <div onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); pick(e.dataTransfer.files[0]); }}
                 className="rounded-xl border-2 border-dashed p-8 text-center transition hover:border-primary">
-                <input ref={input} type="file" accept="video/*,audio/*" className="sr-only" data-testid="input-file" onChange={(e) => pick(e.target.files?.[0])} />
+                <input ref={input} type="file" accept="video/*,.mp4,.m4v,.mov,.webm,.mkv,.avi,.mpeg,.mpg" className="sr-only" data-testid="input-file" onChange={(e) => pick(e.target.files?.[0])} />
                 {file ? (
                   <p className="font-medium" data-testid="text-file">{file.name} <span className="font-mono text-xs text-muted-foreground">{bytes(file.size)}</span></p>
                 ) : <p className="text-sm text-muted-foreground">Drop a recording here. Up to {bytes(maxBytes)} and {maxMin} minutes.</p>}
                 <Button type="button" variant="outline" className="mt-3" onClick={() => input.current?.click()} data-testid="button-choose-file">{file ? 'Choose another' : 'Choose file'}</Button>
               </div>
             ) : (
-              <Input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://..." inputMode="url" aria-label="Video URL" data-testid="input-url" />
+              <div>
+                <Input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://..." inputMode="url" aria-label="Video URL" data-testid="input-url" />
+                <p className="mt-2 text-xs text-muted-foreground">Use a direct video file URL or a public YouTube watch, Shorts or youtu.be link. Private, live and restricted videos are not supported.</p>
+              </div>
             )}
           </div>
 
@@ -166,13 +163,14 @@ export default function Dashboard() {
           <Input id="t" maxLength={200} value={title} onChange={(e) => setTitle(e.target.value)} className="mt-1" data-testid="input-title" />
 
           <div className="mt-5 flex items-center justify-between">
-            <span className="text-sm font-medium">Number of clips</span>
+            <span className="text-sm font-medium">Maximum clips</span>
             <div className="flex items-center gap-3">
               <Button type="button" size="icon" variant="outline" aria-label="Fewer clips" disabled={clips <= 1} onClick={() => setClips(clips - 1)} data-testid="button-clips-minus"><Minus className="h-4 w-4" /></Button>
               <span className="w-8 text-center font-display text-2xl font-extrabold" data-testid="text-clips">{clips}</span>
               <Button type="button" size="icon" variant="outline" aria-label="More clips" disabled={clips >= 10} onClick={() => setClips(clips + 1)} data-testid="button-clips-plus"><Plus className="h-4 w-4" /></Button>
             </div>
           </div>
+          <p className="mt-2 text-xs text-muted-foreground">Short recordings may return fewer clips. We only use moments available in your video.</p>
 
           <fieldset className="mt-5"><legend className="mb-2 text-sm font-medium">Caption style</legend>
             <div className="grid gap-2 sm:grid-cols-3">

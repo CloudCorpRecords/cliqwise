@@ -1,1 +1,2 @@
 - [Managed provider compatibility](managed-provider-compatibility.md) — Stripe may be proxy-only; verify real timestamp support before choosing transcription models.
+- [Video source policy](video-source-policy.md) — whole short recordings receive real assessments; maintained YouTube extraction uses pinned native HTTPS downloads and local merging.

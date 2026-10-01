@@ -131,9 +131,11 @@ export async function reserveCredits(
       watermarked: boolean;
       reservation_period: Date | null;
       status: string;
+      duration_seconds: string | null;
     }>(
       `SELECT id, user_id, credit_source, credits_reserved, free_reserved,
-              paid_reserved, watermarked, reservation_period, status
+              paid_reserved, watermarked, reservation_period, status,
+              duration_seconds
        FROM cw_jobs WHERE id = $1 FOR UPDATE`,
       [jobId],
     );
@@ -142,6 +144,20 @@ export async function reserveCredits(
       throw new ClipwiseError("Job not found", 404);
     }
     if (amount(job.credits_reserved) > 0) {
+      // Repair jobs reserved by earlier versions that failed to persist their
+      // measured duration. Keep the existing reservation and only make an
+      // active job worker-eligible once its duration is available.
+      if (
+        job.duration_seconds == null &&
+        (job.status === "queued" || job.status === "processing")
+      ) {
+        await client.query(
+          `UPDATE cw_jobs
+           SET duration_seconds = $2, status = 'queued', stage = 'queued'
+           WHERE id = $1 AND duration_seconds IS NULL`,
+          [jobId, durationSeconds],
+        );
+      }
       await client.query("COMMIT");
       return { watermarked: job.watermarked };
     }
@@ -187,7 +203,10 @@ export async function reserveCredits(
            paid_reserved = $4,
            reservation_period = $5,
            watermarked = $6,
-           credit_source = CASE WHEN $3 > 0 THEN 'free' ELSE 'paid' END
+           duration_seconds = $7,
+           status = 'queued',
+           stage = 'queued',
+           credit_source = CASE WHEN $3 > 0::numeric THEN 'free' ELSE 'paid' END
        WHERE id = $1`,
       [
         jobId,
@@ -196,6 +215,7 @@ export async function reserveCredits(
         paidReserved,
         account.periodStart,
         watermarked,
+        durationSeconds,
       ],
     );
     await client.query(
