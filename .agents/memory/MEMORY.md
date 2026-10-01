@@ -1,0 +1,1 @@
+- [Managed provider compatibility](managed-provider-compatibility.md) — Stripe may be proxy-only; verify real timestamp support before choosing transcription models.

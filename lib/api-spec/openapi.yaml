@@ -1,36 +1,251 @@
 openapi: 3.1.0
-info:
-  # Do not change the title, if the title changes, the import paths will be broken
-  title: Api
-  version: 0.1.0
-  description: API specification
-servers:
-  - url: /api
-    description: Base API path
-tags:
-  - name: health
-    description: Health operations
+info: {title: Api, version: 0.1.0, description: Clipwise API}
+servers: [{url: /api}]
 paths:
   /healthz:
     get:
       operationId: healthCheck
-      tags: [health]
-      summary: Health check
-      description: Returns server health status
       responses:
         "200":
           description: Healthy
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/HealthStatus"
+          content: {application/json: {schema: {$ref: "#/components/schemas/HealthStatus"}}}
+  /account:
+    get:
+      operationId: getAccount
+      responses:
+        "200":
+          description: Account credits and usage
+          content: {application/json: {schema: {$ref: "#/components/schemas/Account"}}}
+  /jobs:
+    get:
+      operationId: listJobs
+      responses:
+        "200":
+          description: Owned jobs
+          content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Job"}}}}
+    post:
+      operationId: submitVideo
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/VideoInput"}}}
+      responses:
+        "201":
+          description: Queued job
+          content: {application/json: {schema: {$ref: "#/components/schemas/Job"}}}
+  /jobs/{id}:
+    get:
+      operationId: getJob
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200":
+          description: Job progress and results
+          content: {application/json: {schema: {$ref: "#/components/schemas/Job"}}}
+  /keys:
+    get:
+      operationId: listApiKeys
+      responses:
+        "200":
+          description: API keys without secrets
+          content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/ApiKey"}}}}
+    post:
+      operationId: generateApiKey
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/KeyInput"}}}
+      responses:
+        "201":
+          description: Key shown once
+          content: {application/json: {schema: {$ref: "#/components/schemas/KeySecret"}}}
+  /keys/{id}:
+    delete:
+      operationId: revokeApiKey
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses:
+        "200":
+          description: Revoked
+          content: {application/json: {schema: {$ref: "#/components/schemas/Success"}}}
+  /billing/packs:
+    get:
+      operationId: listCreditPacks
+      responses:
+        "200":
+          description: Stripe credit packs
+          content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/CreditPack"}}}}
+  /billing/checkout:
+    post:
+      operationId: createCheckout
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/CheckoutInput"}}}
+      responses:
+        "200":
+          description: Hosted checkout URL
+          content: {application/json: {schema: {$ref: "#/components/schemas/Checkout"}}}
+  /billing/reconcile:
+    get:
+      operationId: reconcileCheckout
+      parameters:
+        - {name: session_id, in: query, required: true, schema: {type: string}}
+      responses:
+        "200":
+          description: Authenticated Stripe confirmation for an owned Checkout session
+          content: {application/json: {schema: {$ref: "#/components/schemas/CheckoutConfirmation"}}}
+  /activity:
+    get:
+      operationId: listActivity
+      responses:
+        "200":
+          description: Recent credit activity
+          content: {application/json: {schema: {type: array, items: {$ref: "#/components/schemas/Activity"}}}}
+  /storage/uploads/request-url:
+    post:
+      operationId: requestUploadUrl
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/UploadInput"}}}
+      responses:
+        "200":
+          description: Upload video directly using PUT then submit objectPath
+          content: {application/json: {schema: {$ref: "#/components/schemas/UploadTicket"}}}
+  /system:
+    get:
+      operationId: getSystemStatus
+      responses:
+        "200":
+          description: Public pipeline configuration and MCP information
+          content: {application/json: {schema: {$ref: "#/components/schemas/SystemStatus"}}}
 components:
   schemas:
     HealthStatus:
       type: object
+      required: [status]
+      properties: {status: {type: string}}
+    Success:
+      type: object
+      required: [success]
+      properties: {success: {type: boolean}}
+    Account:
+      type: object
+      required: [id, freeCredits, paidCredits, totalCredits, monthlyAllowance, resetsAt, minutesProcessed, clipsCreated, jobsCount, activeJobs]
       properties:
-        status:
-          type: string
-      required:
-        - status
-
+        id: {type: string}
+        freeCredits: {type: number}
+        paidCredits: {type: number}
+        totalCredits: {type: number}
+        monthlyAllowance: {type: number}
+        resetsAt: {type: string}
+        minutesProcessed: {type: number}
+        clipsCreated: {type: integer}
+        jobsCount: {type: integer}
+        activeJobs: {type: integer}
+    VideoInput:
+      type: object
+      properties:
+        title: {type: string, maxLength: 200}
+        videoUrl: {type: string}
+        objectPath: {type: string}
+        numberOfClips: {type: integer, minimum: 1, maximum: 10, default: 3}
+        captionStyle: {type: string, enum: [bold, minimal, karaoke], default: bold}
+        creditSource: {type: string, enum: [auto, free, paid], default: auto}
+    Job:
+      type: object
+      required: [id, title, status, progress, stage, createdAt, numberOfClips, captionStyle, creditsReserved, watermarked, clips]
+      properties:
+        id: {type: string}
+        title: {type: string}
+        status: {type: string, enum: [queued, processing, completed, failed]}
+        progress: {type: integer}
+        stage: {type: string}
+        createdAt: {type: string}
+        completedAt: {type: [string, "null"]}
+        durationSeconds: {type: [number, "null"]}
+        numberOfClips: {type: integer}
+        captionStyle: {type: string}
+        creditsReserved: {type: number}
+        watermarked: {type: boolean}
+        error: {type: [string, "null"]}
+        clips: {type: array, items: {$ref: "#/components/schemas/Clip"}}
+    Clip:
+      type: object
+      required: [id, title, durationSeconds, viralityScore, hookScore, storyScore, payoffScore, transcript, downloadUrl, previewUrl]
+      properties:
+        id: {type: string}
+        title: {type: string}
+        durationSeconds: {type: number}
+        viralityScore: {type: number}
+        hookScore: {type: number}
+        storyScore: {type: number}
+        payoffScore: {type: number}
+        transcript: {type: string}
+        downloadUrl: {type: string}
+        previewUrl: {type: string}
+    ApiKey:
+      type: object
+      required: [id, name, prefix, createdAt]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        prefix: {type: string}
+        createdAt: {type: string}
+        lastUsedAt: {type: [string, "null"]}
+        revokedAt: {type: [string, "null"]}
+    KeyInput:
+      type: object
+      required: [name]
+      properties: {name: {type: string, minLength: 1, maxLength: 80}}
+    KeySecret:
+      type: object
+      required: [key, apiKey]
+      properties:
+        key: {type: string}
+        apiKey: {$ref: "#/components/schemas/ApiKey"}
+    CreditPack:
+      type: object
+      required: [id, name, credits, priceCents, currency]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        credits: {type: number}
+        priceCents: {type: integer}
+        currency: {type: string}
+    CheckoutInput:
+      type: object
+      required: [priceId]
+      properties: {priceId: {type: string}}
+    Checkout:
+      type: object
+      required: [url]
+      properties: {url: {type: string}}
+    CheckoutConfirmation:
+      type: object
+      required: [paid]
+      properties: {paid: {type: boolean}}
+    Activity:
+      type: object
+      required: [id, description, credits, createdAt, type]
+      properties:
+        id: {type: string}
+        description: {type: string}
+        credits: {type: number}
+        createdAt: {type: string}
+        type: {type: string}
+    UploadInput:
+      type: object
+      required: [name, size, contentType]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 200}
+        size: {type: number, minimum: 1, maximum: 4294967296}
+        contentType: {type: string}
+    UploadTicket:
+      type: object
+      required: [uploadURL, objectPath]
+      properties: {uploadURL: {type: string}, objectPath: {type: string}}
+    SystemStatus:
+      type: object
+      required: [mcpPath, maxDurationSeconds, maxFileBytes, captionStyles, pipelineReady]
+      properties:
+        mcpPath: {type: string}
+        maxDurationSeconds: {type: integer}
+        maxFileBytes: {type: number}
+        captionStyles: {type: array, items: {type: string}}
+        pipelineReady: {type: boolean}

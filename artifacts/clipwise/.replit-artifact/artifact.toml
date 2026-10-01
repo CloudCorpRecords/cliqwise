@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Clipwise"
+description = "An MCP-first AI video clipping platform with Google login, minute-based credits, Stripe credit packs, API keys, and automatic vertical video clips."
+version = "1.0.0"
+id = "artifacts/clipwise"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 25153
+
+[services.development]
+run = "pnpm --filter @workspace/clipwise run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/clipwise", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/clipwise/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "25153"
+BASE_PATH = "/"

@@ -1,45 +1,41 @@
-# [Project name]
+# Clipwise
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+MCP-first AI video clipping: creators upload long-form videos or provide direct video URLs, then receive scored, captioned vertical MP4 clips.
 
-## Run & Operate
+## Run & operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- Frontend: managed workflow `artifacts/clipwise: web`.
+- API and durable queue worker: `artifacts/api-server: API Server`.
+- `pnpm run typecheck` — full TypeScript check.
+- `pnpm --filter @workspace/api-spec run codegen` — regenerate clients and validation after OpenAPI changes.
+- `pnpm --filter @workspace/db run push` — development schema changes. Publish handles managed production schema; do not add app startup DDL.
+- `pnpm --filter @workspace/scripts exec tsx src/seed-credit-packs.ts` — idempotent Stripe product/price setup. Initial packs: 120/$12, 600/$49, 1800/$129 USD.
 
-## Stack
+## Product and boundaries
 
-- pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+- Google sign-in via Replit-managed Clerk. Configure login providers in the Auth pane; never build local password authentication.
+- Each account receives 60 free processing minutes per UTC calendar month, with no rollover; paid minutes do not expire.
+- Credit reservations are based on probed input duration, not output clip duration. Automatic selection spends paid minutes first. Any job using free minutes receives a watermark on every clip.
+- Failed jobs refund paid credits and refund free credits only within their original monthly period.
+- Streamable HTTP MCP at `/api/mcp`: exactly `submit_video` and `get_job`, bearer API key. Each call checks the live balance and requires positive available credits; web job retrieval works even at zero.
+- MCP uploads use the authenticated upload-ticket endpoint, a direct PUT to App Storage, then `object_path` in `submit_video`. Do not send 4 GB files as JSON/base64.
+- URLs must point to downloadable HTTP(S) video files. YouTube/watch-page extraction is not supported.
+- Up to 3 hours / 4 GiB input; 1–10 clips. Vertical framing is a center crop, not automated speaker tracking.
+- Caption styles: bold, minimal, karaoke. AI virality scores are estimates, not guarantees. Component scores and reasoning are retained for future selection analysis; there is no automatic model training.
+- Private outputs have one-hour signed links; refresh the job to renew them.
 
-## Where things live
+## Implementation
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- OpenAPI is the REST contract in `lib/api-spec/openapi.yaml`.
+- Drizzle app schema: `lib/db/src/schema/clipwise.ts`; application data remains in PostgreSQL.
+- Shared API has focused account/credits/key store, REST/MCP routes, Stripe billing and media pipeline modules under `artifacts/api-server/src/`.
+- User files and MP4 outputs remain private in App Storage; local files are disposable processing intermediates.
+- Queue rows persist in PostgreSQL, with advisory locks for active worker ownership and recovery.
+- Browser API uses Clerk cookies; do not add explicit browser bearer tokens. MCP bearer keys are hashed at rest and shown once.
+- AI moment scoring uses OpenAI through Replit AI Integrations, billed to the builder's Replit credits; these are separate from app processing credits.
+- Transcription requires provider word timestamps, never guessed word timing.
+- Runtime video processing needs FFmpeg with libass, H.264/AAC and DejaVu fonts. Only spawn processes with argument arrays, never shell-interpolate input.
+- Development structured logging defaults to debug, production to info. Never log bearer keys, session cookies, private URLs or transcripts.
 
-## Architecture decisions
-
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
-
-## Product
-
-_Describe the high-level user-facing capabilities of this app once they exist._
-
-## User preferences
-
-_Populate as you build — explicit user instructions worth remembering across sessions._
-
-## Gotchas
-
-_Populate as you build — sharp edges, "always run X before Y" rules._
-
-## Pointers
-
-- See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details
+- Billing uses the connected Stripe proxy for catalog, Checkout, authenticated event/session verification and reconciliation. App purchases are transactionally idempotent.
+- Speech transcription uses connected ElevenLabs Scribe with actual word timestamps, while moment scoring uses OpenAI.
