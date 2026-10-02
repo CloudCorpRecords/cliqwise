@@ -6,6 +6,15 @@ import { Button } from '@/components/ui/button';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 
 const rise = { initial: { opacity: 0, y: 24 }, whileInView: { opacity: 1, y: 0 }, viewport: { once: true, margin: '-60px' }, transition: { duration: 0.6, ease: [0.2, 0.7, 0.2, 1] as const } };
+const MCP_ENDPOINT = 'https://clipwise.replit.app/api/mcp';
+const cursorConfig = JSON.stringify({
+  mcpServers: {
+    clipwise: {
+      url: MCP_ENDPOINT,
+      headers: { Authorization: 'Bearer YOUR_CLIPWISE_API_KEY' },
+    },
+  },
+}, null, 2);
 
 function Sample() {
   const bars = Array.from({ length: 44 }, (_, i) => 20 + ((i * 37) % 70));
@@ -35,7 +44,7 @@ function Sample() {
 const faqs = [
   ['What counts as a minute?', 'One credit is one minute of source video. The minutes are reserved when a job starts and shown in your usage ledger.'],
   ['Why are some clips watermarked?', 'Any job paid for with free monthly minutes is watermarked. Jobs paid with purchased minutes are not. Auto mode spends paid minutes first.'],
-  ['What are the limits?', 'Files up to 4 GB and 3 hours. Ask for 1 to 10 clips per job, with bold, minimal, or karaoke captions.'],
+  ['What are the limits?', 'Files up to 4 GB and 3 hours. Ask for 1 to 10 clips per job. Choose one of three caption styles: bold, minimal, or karaoke. Karaoke highlights words in time with speech; it is not a separate fourth style.'],
   ['Can my AI assistant run it?', 'Yes. Generate an API key and connect any MCP client. Two tools: submit_video and get_job.'],
 ];
 
@@ -89,12 +98,13 @@ export default function Landing() {
           <Eyebrow>Scores you can read</Eyebrow>
           <h2 className="font-display mt-2 text-4xl font-extrabold md:text-5xl">Every clip arrives with its reasoning.</h2>
           <p className="mt-4 text-muted-foreground">Virality, hook, story, and payoff scores sit beside the transcript, so you know why a moment was chosen before you post it.</p>
+          <p className="mt-4 text-sm text-muted-foreground">Three caption styles: bold, minimal, and karaoke. Karaoke highlights words in time with speech.</p>
         </motion.div>
         <motion.div {...rise} className="grid grid-cols-3 gap-3 self-center">
           {['bold', 'minimal', 'karaoke'].map((s, i) => (
             <div key={s} className="aspect-[9/14] rounded-xl border-2 border-foreground bg-card p-2 flex flex-col justify-end" style={{ transform: `rotate(${(i - 1) * 3}deg)` }}>
               <span className={`${s === 'bold' ? 'font-display text-lg font-extrabold uppercase' : s === 'minimal' ? 'text-[10px]' : 'font-display text-sm font-bold'} leading-tight`}>
-                {s === 'karaoke' ? <><span className="bg-secondary px-0.5">word</span> by word</> : 'Caption style'}
+                {s === 'karaoke' ? <><span className="bg-secondary px-0.5">Karaoke</span> captions</> : 'Caption style'}
               </span>
               <span className="mt-1 font-mono text-[10px] text-muted-foreground">{s}</span>
             </div>
@@ -104,18 +114,28 @@ export default function Landing() {
 
       <section id="mcp" className="bg-secondary py-24 text-secondary-foreground">
         <div className="mx-auto grid max-w-6xl items-center gap-10 px-5 md:grid-cols-2">
-          <motion.div {...rise}>
+          <motion.div {...rise} className="min-w-0">
             <p className="font-mono text-xs uppercase tracking-[0.18em]"><Plug className="mr-1 inline h-3.5 w-3.5" />Direct AI-client access</p>
             <h2 className="font-display mt-2 text-4xl font-extrabold md:text-6xl">Ask your assistant to clip it.</h2>
             <p className="mt-4 max-w-md">Connect Claude, Cursor, or any MCP client with a bearer key. Two tools, nothing to learn.</p>
+            <p className="mt-5 font-mono text-xs font-semibold uppercase tracking-wider">Streamable HTTP endpoint · POST</p>
+            <code className="mt-2 block break-all rounded-lg bg-secondary-foreground/10 p-3 font-mono text-sm select-all" data-testid="text-mcp-endpoint">{MCP_ENDPOINT}</code>
           </motion.div>
-          <motion.pre {...rise} className="overflow-x-auto rounded-2xl bg-sidebar p-5 font-mono text-xs leading-relaxed text-sidebar-foreground">{`submit_video
+          <motion.pre {...rise} className="min-w-0 overflow-x-auto rounded-2xl bg-sidebar p-5 font-mono text-xs leading-relaxed text-sidebar-foreground">{`submit_video
   videoUrl | objectPath
   numberOfClips, captionStyle,
   creditSource
 
 get_job
   id -> status, progress, clips[]`}</motion.pre>
+        </div>
+        <div className="mx-auto mt-10 grid max-w-6xl gap-6 px-5 md:grid-cols-2">
+          <div className="min-w-0">
+            <h3 className="font-display text-2xl font-bold">Connect from Cursor</h3>
+            <p className="mt-3 text-sm leading-relaxed">Generate a key on the web studio’s <Link href="/api-keys" className="font-semibold underline underline-offset-4">API Keys page</Link>. Add this configuration to your personal <code className="break-all font-mono">~/.cursor/mcp.json</code>, replacing <code className="break-all font-mono">YOUR_CLIPWISE_API_KEY</code> with your key.</p>
+            <p className="mt-3 text-sm">Keep your key private; never commit it to a repository. MCP requests require a positive credit balance.</p>
+          </div>
+          <pre className="min-w-0 overflow-x-auto rounded-2xl bg-sidebar p-5 font-mono text-xs leading-relaxed text-sidebar-foreground" data-testid="code-cursor-mcp-config">{cursorConfig}</pre>
         </div>
       </section>
 
