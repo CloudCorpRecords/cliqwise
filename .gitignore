@@ -49,3 +49,6 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# local test artifacts
+test-results/
